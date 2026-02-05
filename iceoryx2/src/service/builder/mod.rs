@@ -26,6 +26,9 @@ pub mod request_response;
 /// Builder for [`MessagingPattern::Blackboard`](crate::service::messaging_pattern::MessagingPattern::Blackboard)
 pub mod blackboard;
 
+/// Builder for staged pipeline communication composed from publish-subscribe edges.
+pub mod pipeline;
+
 use core::fmt::Debug;
 use core::hash::Hash;
 use core::marker::PhantomData;
@@ -218,6 +221,13 @@ impl<S: Service> Builder<S> {
             self.shared_node,
         )
         .blackboard_opener()
+    }
+
+    /// Create a new builder to create or open a staged pipeline communication setup.
+    pub fn pipeline<PayloadType: Debug + ?Sized + ZeroCopySend>(
+        self,
+    ) -> pipeline::Builder<PayloadType, S> {
+        pipeline::Builder::new(self.name, self.shared_node)
     }
 }
 

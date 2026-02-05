@@ -51,6 +51,9 @@ pub mod notifier;
 /// communication and to acquire static and dynamic service information
 pub mod publish_subscribe;
 
+/// Factory to create staged pipeline role endpoints and acquire runtime pipeline details.
+pub mod pipeline;
+
 /// Factory to create a [`Publisher`](crate::port::publisher::Publisher)
 pub mod publisher;
 
