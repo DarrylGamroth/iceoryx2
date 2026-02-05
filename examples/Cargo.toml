@@ -162,6 +162,12 @@ path = "rust/health_monitoring/subscriber.rs"
 name = "health_monitoring_central_daemon"
 path = "rust/health_monitoring/central_daemon.rs"
 
+# pipeline
+
+[[example]]
+name = "pipeline"
+path = "rust/pipeline/pipeline.rs"
+
 # publish_subscribe
 
 [[example]]

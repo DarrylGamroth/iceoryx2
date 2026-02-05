@@ -40,7 +40,7 @@ So if you want to communicate efficiently between multiple processes or
 applications iceoryx2 is for you. With iceoryx2, you can:
 
 * Send huge amounts of data using a publish/subscribe, request/response,
-  pipeline (planned) or blackboard pattern (planned), making it ideal
+  pipeline (experimental) or blackboard pattern, making it ideal
   for scenarios where large datasets need to be shared.
 * Exchange signals through events, enabling quick and reliable signaling between
   processes.
@@ -50,8 +50,8 @@ seamless inter-process communication (IPC).
 
 It is all about providing a seamless experience for inter-process communication,
 featuring versatile messaging patterns. Whether you're diving into
-publish-subscribe, events, request-response, or the promise of upcoming features
-like pipelines, and blackboard, iceoryx2 has you covered.
+publish-subscribe, events, request-response, pipelines, or blackboard,
+iceoryx2 has you covered.
 
 One of the features of iceoryx2 is its consistently low transmission latency
 regardless of payload size, ensuring a predictable and reliable communication
