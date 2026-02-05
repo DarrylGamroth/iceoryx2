@@ -33,6 +33,7 @@ auto main() -> int {
     const double initial_value = 1.1;
     auto service = node.service_builder(ServiceName::create("My/Funk/ServiceName").value())
                        .blackboard_creator<BlackboardKey>()
+                       .max_writers(2)
                        .template add<int32_t>(key_0, 3)
                        .template add<double>(key_1, initial_value)
                        .create()

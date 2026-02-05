@@ -28,7 +28,7 @@ impl From<&StaticConfig> for iox2_static_config_blackboard_t {
     fn from(c: &StaticConfig) -> Self {
         Self {
             max_readers: c.max_readers(),
-            max_writers: 1,
+            max_writers: c.max_writers(),
             max_nodes: c.max_nodes(),
             type_details: c.type_details().into(),
         }

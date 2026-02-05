@@ -301,6 +301,38 @@ pub mod service_blackboard {
     }
 
     #[conformance_test]
+    pub fn open_fails_when_service_does_not_satisfy_max_writers_requirement<Sut: Service>() {
+        let service_name = generate_name();
+        let config = generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+        let sut = node
+            .service_builder(&service_name)
+            .blackboard_creator::<u64>()
+            .add::<u8>(0, 0)
+            .max_writers(2)
+            .create();
+        assert_that!(sut, is_ok);
+
+        let sut2 = node
+            .service_builder(&service_name)
+            .blackboard_opener::<u64>()
+            .max_writers(3)
+            .open();
+
+        assert_that!(sut2, is_err);
+        assert_that!(
+            sut2.err().unwrap(), eq BlackboardOpenError::DoesNotSupportRequestedAmountOfWriters);
+
+        let sut2 = node
+            .service_builder(&service_name)
+            .blackboard_opener::<u64>()
+            .max_writers(1)
+            .open();
+
+        assert_that!(sut2, is_ok);
+    }
+
+    #[conformance_test]
     pub fn open_does_not_fail_when_service_owner_is_dropped<Sut: Service>() {
         let service_name = generate_name();
         let config = generate_isolated_config();
@@ -462,12 +494,14 @@ pub mod service_blackboard {
         let config = generate_isolated_config();
         let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
         const MAX_READERS: usize = 8;
+        const MAX_WRITERS: usize = 2;
 
         let sut = node
             .service_builder(&service_name)
             .blackboard_creator::<u64>()
             .add::<u8>(0, 0)
             .max_readers(MAX_READERS)
+            .max_writers(MAX_WRITERS)
             .create()
             .unwrap();
 
@@ -778,6 +812,7 @@ pub mod service_blackboard {
     #[conformance_test]
     pub fn creating_max_supported_amount_of_ports_work<Sut: Service>() {
         const MAX_READERS: usize = 8;
+        const MAX_WRITERS: usize = 2;
 
         let service_name = generate_name();
         let config = generate_isolated_config();
@@ -787,14 +822,19 @@ pub mod service_blackboard {
             .blackboard_creator::<u64>()
             .add::<u8>(0, 0)
             .max_readers(MAX_READERS)
+            .max_writers(MAX_WRITERS)
             .create()
             .unwrap();
 
         let mut readers = vec![];
 
         // acquire all possible ports
-        let writer = sut.writer_builder().create();
-        assert_that!(writer, is_ok);
+        let mut writers = vec![];
+        for _ in 0..MAX_WRITERS {
+            let writer = sut.writer_builder().create();
+            assert_that!(writer, is_ok);
+            writers.push(writer);
+        }
 
         for _ in 0..MAX_READERS {
             let reader = sut.reader_builder().create();
@@ -803,10 +843,10 @@ pub mod service_blackboard {
         }
 
         // create additional ports and fail
-        let writer2 = sut.writer_builder().create();
-        assert_that!(writer2, is_err);
+        let writer_extra = sut.writer_builder().create();
+        assert_that!(writer_extra, is_err);
         assert_that!(
-            writer2.err().unwrap(), eq
+            writer_extra.err().unwrap(), eq
             WriterCreateError::ExceedsMaxSupportedWriters
         );
 
@@ -817,8 +857,8 @@ pub mod service_blackboard {
             ReaderCreateError::ExceedsMaxSupportedReaders
         );
 
-        // remove one reader and the writer
-        drop(writer);
+        // remove one reader and one writer
+        writers.pop();
         assert_that!(readers.remove(0), is_ok);
 
         // create additional ports shall work again
@@ -827,6 +867,98 @@ pub mod service_blackboard {
 
         let reader = sut.reader_builder().create();
         assert_that!(reader, is_ok);
+    }
+
+    #[conformance_test]
+    pub fn multiple_writers_can_update_same_key<Sut: Service>() {
+        let service_name = generate_name();
+        let config = generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let sut = node
+            .service_builder(&service_name)
+            .blackboard_creator::<u64>()
+            .add::<u64>(0, 0)
+            .max_writers(2)
+            .create()
+            .unwrap();
+
+        let writer_1 = sut.writer_builder().create().unwrap();
+        let writer_2 = sut.writer_builder().create().unwrap();
+        let reader = sut.reader_builder().create().unwrap();
+
+        let entry_writer_1 = writer_1.entry::<u64>(&0).unwrap();
+        let entry_writer_2 = writer_2.entry::<u64>(&0).unwrap();
+        let entry_reader = reader.entry::<u64>(&0).unwrap();
+
+        entry_writer_1.update_with_copy(10);
+        let value_1 = entry_reader.get();
+        assert_that!(*value_1, eq 10);
+
+        entry_writer_2.update_with_copy(20);
+        let value_2 = entry_reader.get();
+        assert_that!(*value_2, eq 20);
+        assert_that!(entry_reader.is_up_to_date(&value_1), eq false);
+        assert_that!(entry_reader.is_up_to_date(&value_2), eq true);
+    }
+
+    #[conformance_test]
+    pub fn concurrent_writers_make_progress<Sut: Service>() {
+        let _watch_dog = Watchdog::new();
+        const WRITERS: usize = 4;
+        const ITERATIONS: u64 = 64;
+
+        let service_name = generate_name();
+        let config = generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+
+        let sut = node
+            .service_builder(&service_name)
+            .blackboard_creator::<u64>()
+            .add::<u64>(0, 0)
+            .max_writers(WRITERS)
+            .create()
+            .unwrap();
+
+        let mut entry_handles = Vec::new();
+        for _ in 0..WRITERS {
+            let writer = sut.writer_builder().create().unwrap();
+            entry_handles.push(writer.entry::<u64>(&0).unwrap());
+        }
+
+        let reader = sut.reader_builder().create().unwrap();
+        let entry_handle = reader.entry::<u64>(&0).unwrap();
+
+        let start_barrier = Barrier::new(WRITERS + 1);
+        let end_barrier = Barrier::new(WRITERS + 1);
+
+        std::thread::scope(|s| {
+            let mut writer_threads = Vec::new();
+            for (index, entry_handle_mut) in entry_handles.into_iter().enumerate() {
+                let start_barrier_ref = &start_barrier;
+                let end_barrier_ref = &end_barrier;
+                writer_threads.push(s.spawn(move || {
+                    for i in 0..ITERATIONS {
+                        start_barrier_ref.wait();
+                        let value = (i << 32) | (index as u64);
+                        entry_handle_mut.update_with_copy(value);
+                        end_barrier_ref.wait();
+                    }
+                }));
+            }
+
+            for i in 0..ITERATIONS {
+                start_barrier.wait();
+                end_barrier.wait();
+                let value = *entry_handle.get();
+                let observed_iteration = value >> 32;
+                assert_that!(observed_iteration, eq i);
+            }
+
+            for handle in writer_threads {
+                handle.join().unwrap();
+            }
+        });
     }
 
     #[conformance_test]
@@ -859,6 +991,22 @@ pub mod service_blackboard {
             .unwrap();
 
         assert_that!(sut.static_config().max_readers(), eq 1);
+    }
+
+    #[conformance_test]
+    pub fn set_max_writers_to_zero_adjusts_it_to_one<Sut: Service>() {
+        let service_name = generate_name();
+        let config = generate_isolated_config();
+        let node = NodeBuilder::new().config(&config).create::<Sut>().unwrap();
+        let sut = node
+            .service_builder(&service_name)
+            .blackboard_creator::<u64>()
+            .add::<u8>(0, 0)
+            .max_writers(0)
+            .create()
+            .unwrap();
+
+        assert_that!(sut.static_config().max_writers(), eq 1);
     }
 
     #[conformance_test]
@@ -1193,6 +1341,8 @@ pub mod service_blackboard {
     "BlackboardOpenError::IncompatibleAttributes");
         assert_that!(format!("{}", BlackboardOpenError::DoesNotSupportRequestedAmountOfReaders), eq
     "BlackboardOpenError::DoesNotSupportRequestedAmountOfReaders");
+        assert_that!(format!("{}", BlackboardOpenError::DoesNotSupportRequestedAmountOfWriters), eq
+    "BlackboardOpenError::DoesNotSupportRequestedAmountOfWriters");
         assert_that!(format!("{}", BlackboardOpenError::DoesNotSupportRequestedAmountOfNodes), eq
     "BlackboardOpenError::DoesNotSupportRequestedAmountOfNodes");
         assert_that!(format!("{}", BlackboardOpenError::InsufficientPermissions), eq

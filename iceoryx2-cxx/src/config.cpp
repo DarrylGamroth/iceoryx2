@@ -655,6 +655,14 @@ void Blackboard::set_max_readers(size_t value) && {
     iox2_config_defaults_blackboard_set_max_readers(m_config, value);
 }
 
+auto Blackboard::max_writers() && -> size_t {
+    return iox2_config_defaults_blackboard_max_writers(m_config);
+}
+
+void Blackboard::set_max_writers(size_t value) && {
+    iox2_config_defaults_blackboard_set_max_writers(m_config, value);
+}
+
 auto Blackboard::max_nodes() && -> size_t {
     return iox2_config_defaults_blackboard_max_nodes(m_config);
 }

@@ -81,7 +81,8 @@ TYPED_TEST(ServiceTest, list_works) {
     const auto service_name_3 = iox2_testing::generate_service_name();
     const auto service_name_4 = iox2_testing::generate_service_name();
 
-    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto config = iox2_testing::generate_isolated_config();
+    auto node = NodeBuilder().config(config).create<SERVICE_TYPE>().value();
 
     auto sut_1 = node.service_builder(service_name_1).template publish_subscribe<uint64_t>().create().value();
     auto sut_2 = node.service_builder(service_name_2).event().create().value();
@@ -117,7 +118,7 @@ TYPED_TEST(ServiceTest, list_works) {
     };
     //NOLINTEND(readability-function-cognitive-complexity)
 
-    auto result = Service<SERVICE_TYPE>::list(Config::global_config(), verify);
+    auto result = Service<SERVICE_TYPE>::list(config.view(), verify);
 
     ASSERT_THAT(result.has_value(), Eq(true));
 }
@@ -136,7 +137,8 @@ TYPED_TEST(ServiceTest, list_works_with_attributes) {
     const auto service_name_3 = iox2_testing::generate_service_name();
     const auto service_name_4 = iox2_testing::generate_service_name();
 
-    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto config = iox2_testing::generate_isolated_config();
+    auto node = NodeBuilder().config(config).create<SERVICE_TYPE>().value();
 
     auto attribute_specifier = AttributeSpecifier();
     attribute_specifier.define(key_1, value_1).value();
@@ -230,7 +232,7 @@ TYPED_TEST(ServiceTest, list_works_with_attributes) {
     };
     //NOLINTEND(readability-function-cognitive-complexity)
 
-    auto result = Service<SERVICE_TYPE>::list(Config::global_config(), verify);
+    auto result = Service<SERVICE_TYPE>::list(config.view(), verify);
 
     ASSERT_THAT(result.has_value(), Eq(true));
 }

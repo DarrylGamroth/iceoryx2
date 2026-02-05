@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     let service = node
         .service_builder(&"My/Funk/ServiceName".try_into()?)
         .blackboard_creator::<BlackboardKey>()
+        .max_writers(2)
         .add::<i32>(key_0, 3)
         .add::<f64>(key_1, INITIAL_VALUE_1)
         .create()?;

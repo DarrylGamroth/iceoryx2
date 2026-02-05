@@ -53,7 +53,7 @@ impl StaticConfig {
     pub(crate) fn new(config: &config::Config) -> Self {
         Self {
             max_readers: config.defaults.blackboard.max_readers,
-            max_writers: 1,
+            max_writers: config.defaults.blackboard.max_writers,
             max_nodes: config.defaults.blackboard.max_nodes,
             type_details: TypeDetail::default(),
         }
@@ -68,6 +68,11 @@ impl StaticConfig {
     /// Returns the maximum supported amount of [`crate::port::reader::Reader`] ports
     pub fn max_readers(&self) -> usize {
         self.max_readers
+    }
+
+    /// Returns the maximum supported amount of [`crate::port::writer::Writer`] ports
+    pub fn max_writers(&self) -> usize {
+        self.max_writers
     }
 
     /// Returns the type details of the [`crate::service::Service`].

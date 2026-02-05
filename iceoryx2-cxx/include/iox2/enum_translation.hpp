@@ -1193,6 +1193,8 @@ constexpr auto from<int, iox2::BlackboardOpenError>(const int value) noexcept ->
         return iox2::BlackboardOpenError::IncompatibleMessagingPattern;
     case iox2_blackboard_open_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_READERS:
         return iox2::BlackboardOpenError::DoesNotSupportRequestedAmountOfReaders;
+    case iox2_blackboard_open_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_WRITERS:
+        return iox2::BlackboardOpenError::DoesNotSupportRequestedAmountOfWriters;
     case iox2_blackboard_open_error_e_O_INSUFFICIENT_PERMISSIONS:
         return iox2::BlackboardOpenError::InsufficientPermissions;
     case iox2_blackboard_open_error_e_O_HANGS_IN_CREATION:
@@ -1227,6 +1229,8 @@ from<iox2::BlackboardOpenError, iox2_blackboard_open_error_e>(const iox2::Blackb
         return iox2_blackboard_open_error_e_O_INCOMPATIBLE_MESSAGING_PATTERN;
     case iox2::BlackboardOpenError::DoesNotSupportRequestedAmountOfReaders:
         return iox2_blackboard_open_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_READERS;
+    case iox2::BlackboardOpenError::DoesNotSupportRequestedAmountOfWriters:
+        return iox2_blackboard_open_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_WRITERS;
     case iox2::BlackboardOpenError::InsufficientPermissions:
         return iox2_blackboard_open_error_e_O_INSUFFICIENT_PERMISSIONS;
     case iox2::BlackboardOpenError::HangsInCreation:

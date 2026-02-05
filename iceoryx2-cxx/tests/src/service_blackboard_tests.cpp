@@ -341,6 +341,36 @@ TYPED_TEST(ServiceBlackboardTest, open_fails_when_service_does_not_satisfy_max_r
     ASSERT_TRUE(service_success.has_value());
 }
 
+TYPED_TEST(ServiceBlackboardTest, open_fails_when_service_does_not_satisfy_max_writers_requirement) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+    constexpr uint64_t NUMBER_OF_WRITERS = 3;
+
+    const auto service_name = iox2_testing::generate_service_name();
+
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto service = node.service_builder(service_name)
+                       .template blackboard_creator<uint64_t>()
+                       .max_writers(NUMBER_OF_WRITERS)
+                       .template add_with_default<uint64_t>(0)
+                       .create()
+                       .value();
+
+    auto service_fail = node.service_builder(service_name)
+                            .template blackboard_opener<uint64_t>()
+                            .max_writers(NUMBER_OF_WRITERS + 1)
+                            .open();
+
+    ASSERT_FALSE(service_fail.has_value());
+    ASSERT_THAT(service_fail.error(), Eq(BlackboardOpenError::DoesNotSupportRequestedAmountOfWriters));
+
+    auto service_success = node.service_builder(service_name)
+                               .template blackboard_opener<uint64_t>()
+                               .max_writers(NUMBER_OF_WRITERS - 1)
+                               .open();
+
+    ASSERT_TRUE(service_success.has_value());
+}
+
 TYPED_TEST(ServiceBlackboardTest, open_works_when_service_owner_goes_out_of_scope) {
     constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
 
@@ -402,6 +432,7 @@ TYPED_TEST(ServiceBlackboardTest, properties_are_set_to_config_default) {
     auto config = Config();
 
     ASSERT_THAT(service.static_config().max_readers(), Eq(config.defaults().blackboard().max_readers()));
+    ASSERT_THAT(service.static_config().max_writers(), Eq(config.defaults().blackboard().max_writers()));
     ASSERT_THAT(service.static_config().max_nodes(), Eq(config.defaults().blackboard().max_nodes()));
 }
 
@@ -416,13 +447,16 @@ TYPED_TEST(ServiceBlackboardTest, open_uses_predefined_settings_when_nothing_is_
                           .template add_with_default<uint64_t>(0)
                           .max_nodes(2)
                           .max_readers(4)
+                          .max_writers(3)
                           .create()
                           .value();
     ASSERT_THAT(sut_create.static_config().max_readers(), Eq(4));
+    ASSERT_THAT(sut_create.static_config().max_writers(), Eq(3));
     ASSERT_THAT(sut_create.static_config().max_nodes(), Eq(2));
 
     auto sut_open = node.service_builder(service_name).template blackboard_opener<uint64_t>().open().value();
     ASSERT_THAT(sut_open.static_config().max_readers(), Eq(4));
+    ASSERT_THAT(sut_open.static_config().max_writers(), Eq(3));
     ASSERT_THAT(sut_open.static_config().max_nodes(), Eq(2));
 }
 
@@ -430,6 +464,7 @@ TYPED_TEST(ServiceBlackboardTest, setting_service_properties_works) {
     constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
     constexpr uint64_t NUMBER_OF_NODES = 10;
     constexpr uint64_t NUMBER_OF_READERS = 11;
+    constexpr uint64_t NUMBER_OF_WRITERS = 5;
 
     const auto service_name = iox2_testing::generate_service_name();
 
@@ -438,6 +473,7 @@ TYPED_TEST(ServiceBlackboardTest, setting_service_properties_works) {
                        .template blackboard_creator<uint64_t>()
                        .max_nodes(NUMBER_OF_NODES)
                        .max_readers(NUMBER_OF_READERS)
+                       .max_writers(NUMBER_OF_WRITERS)
                        .template add_with_default<uint64_t>(0)
                        .create()
                        .value();
@@ -446,6 +482,7 @@ TYPED_TEST(ServiceBlackboardTest, setting_service_properties_works) {
 
     ASSERT_THAT(static_config.max_nodes(), Eq(NUMBER_OF_NODES));
     ASSERT_THAT(static_config.max_readers(), Eq(NUMBER_OF_READERS));
+    ASSERT_THAT(static_config.max_writers(), Eq(NUMBER_OF_WRITERS));
     ASSERT_THAT(static_config.type_details().variant(), Eq(TypeVariant::FixedSize));
     ASSERT_THAT(static_config.type_details().size(), Eq(sizeof(uint64_t)));
     ASSERT_THAT(static_config.type_details().alignment(), Eq(alignof(uint64_t)));
@@ -761,6 +798,36 @@ TYPED_TEST(ServiceBlackboardTest, simple_communication_works_writer_created_firs
     ASSERT_THAT(*entry_handle.get(), Eq(VALUE_2));
 }
 
+TYPED_TEST(ServiceBlackboardTest, multiple_writers_can_update_same_key) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+    constexpr uint64_t VALUE_1 = 10;
+    constexpr uint64_t VALUE_2 = 20;
+
+    const auto service_name = iox2_testing::generate_service_name();
+
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto service = node.service_builder(service_name)
+                       .template blackboard_creator<uint64_t>()
+                       .max_writers(2)
+                       .template add_with_default<uint64_t>(0)
+                       .create()
+                       .value();
+
+    auto writer_1 = service.writer_builder().create().value();
+    auto writer_2 = service.writer_builder().create().value();
+    auto reader = service.reader_builder().create().value();
+
+    auto entry_writer_1 = writer_1.template entry<uint64_t>(0).value();
+    auto entry_writer_2 = writer_2.template entry<uint64_t>(0).value();
+    auto entry_reader = reader.template entry<uint64_t>(0).value();
+
+    entry_writer_1.update_with_copy(VALUE_1);
+    ASSERT_THAT(*entry_reader.get(), Eq(VALUE_1));
+
+    entry_writer_2.update_with_copy(VALUE_2);
+    ASSERT_THAT(*entry_reader.get(), Eq(VALUE_2));
+}
+
 TYPED_TEST(ServiceBlackboardTest, communication_with_max_readers) {
     constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
     constexpr uint64_t MAX_READERS = 6;
@@ -965,6 +1032,22 @@ TYPED_TEST(ServiceBlackboardTest, set_max_readers_to_zero_adjusts_it_to_one) {
                    .value();
 
     ASSERT_THAT(sut.static_config().max_readers(), Eq(1));
+}
+
+TYPED_TEST(ServiceBlackboardTest, set_max_writers_to_zero_adjusts_it_to_one) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+
+    const auto service_name = iox2_testing::generate_service_name();
+
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto sut = node.service_builder(service_name)
+                   .template blackboard_creator<uint64_t>()
+                   .template add_with_default<uint64_t>(0)
+                   .max_writers(0)
+                   .create()
+                   .value();
+
+    ASSERT_THAT(sut.static_config().max_writers(), Eq(1));
 }
 
 TYPED_TEST(ServiceBlackboardTest, dropping_service_keeps_established_communication) {

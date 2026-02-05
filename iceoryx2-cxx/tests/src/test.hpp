@@ -13,13 +13,23 @@
 #ifndef IOX2_CXX_TESTS_TEST_HPP
 #define IOX2_CXX_TESTS_TEST_HPP
 
+#include "iox2/bb/file_name.hpp"
+#include "iox2/bb/path.hpp"
+#include "iox2/bb/static_string.hpp"
+#include "iox2/config.hpp"
 #include "iox2/service_name.hpp"
 #include "iox2/service_type.hpp"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <string>
 
 using namespace ::testing;
 
@@ -42,6 +52,53 @@ inline auto generate_service_name() -> ServiceName {
                                 + "_" + std::to_string(random_number))
                                    .c_str())
         .value();
+}
+
+inline auto test_directory() -> bb::Path {
+#if defined(_WIN32)
+    return bb::Path::create("C:\\Temp\\iceoryx2\\tests\\").value();
+#elif defined(__QNXNTO__)
+    return bb::Path::create("/data/iceoryx2/tests/").value();
+#else
+    return bb::Path::create("/tmp/iceoryx2/tests/").value();
+#endif
+}
+
+inline auto generate_isolated_config() -> Config {
+    const auto root_path = test_directory();
+    const auto* root_path_cstr = root_path.as_string().unchecked_access().c_str();
+    std::error_code ec;
+    std::filesystem::create_directories(root_path_cstr, ec);
+    if (ec) {
+        ADD_FAILURE() << "Failed to create test directory \"" << root_path_cstr << "\": " << ec.message();
+    }
+
+    static std::atomic<uint64_t> COUNTER { 0 };
+    const auto now = static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count());
+    const auto random_number = static_cast<uint64_t>(rand()); // NOLINT(cert-msc30-c,cert-msc50-cpp)
+
+    auto prefix = iox2::bb::FileName::create("test_prefix_").value();
+    char suffix_buffer[64];
+    const auto written = std::snprintf(suffix_buffer,
+                                       sizeof(suffix_buffer),
+                                       "%" PRIu64 "_%" PRIu64 "_%" PRIu64,
+                                       COUNTER.fetch_add(1),
+                                       now,
+                                       random_number);
+    if (written > 0) {
+        using SuffixString = bb::StaticString<bb::platform::IOX2_MAX_FILENAME_LENGTH>;
+        const auto suffix = SuffixString::from_utf8_null_terminated_unchecked_truncated(suffix_buffer,
+                                                                                         sizeof(suffix_buffer));
+        auto append_result = prefix.append(suffix);
+        EXPECT_TRUE(append_result.has_value());
+    } else {
+        ADD_FAILURE() << "Failed to format test prefix suffix.";
+    }
+
+    auto config = Config();
+    config.global().set_root_path(root_path);
+    config.global().set_prefix(prefix);
+    return config;
 }
 } // namespace iox2_testing
 

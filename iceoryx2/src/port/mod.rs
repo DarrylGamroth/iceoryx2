@@ -17,6 +17,7 @@ use update_connections::ConnectionFailure;
 
 pub(crate) mod details;
 pub use details::data_segment::DataSegmentType;
+pub(crate) mod blackboard_entry;
 
 /// Sends requests to a [`Server`](crate::port::server::Server) and receives responses.
 pub mod client;

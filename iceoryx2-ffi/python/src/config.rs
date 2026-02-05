@@ -1018,6 +1018,18 @@ impl Blackboard {
     }
 
     #[getter]
+    /// The maximum amount of supported `Writer`s
+    pub fn max_writers(&self) -> usize {
+        self.0.lock().defaults.blackboard.max_writers
+    }
+
+    #[setter]
+    /// Set the maximum amount of supported `Writer`s
+    pub fn set_max_writers(&self, value: usize) {
+        self.0.lock().defaults.blackboard.max_writers = value
+    }
+
+    #[getter]
     /// The maximum amount of supported `Node`s. Defines indirectly how many
     /// processes can open the service at the same time.
     pub fn max_nodes(&self) -> usize {

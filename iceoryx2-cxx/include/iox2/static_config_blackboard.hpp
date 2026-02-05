@@ -29,6 +29,9 @@ class StaticConfigBlackboard {
     /// Returns the maximum supported amount of [`Reader`] ports
     auto max_readers() const -> size_t;
 
+    /// Returns the maximum supported amount of [`Writer`] ports
+    auto max_writers() const -> size_t;
+
     /// Returns the type details of the [`Service`].
     auto type_details() const -> TypeDetail;
 

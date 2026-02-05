@@ -109,6 +109,9 @@ int main(void) {
     // set key eq comparison function
     iox2_service_builder_blackboard_creator_set_key_eq_comparison_function(&service_builder_blackboard, key_cmp);
 
+    // allow multiple writers to update the same key
+    iox2_service_builder_blackboard_creator_set_max_writers(&service_builder_blackboard, 2);
+
     // add key-value pairs
     struct BlackboardKey key_0;
     key_0.x = 0;

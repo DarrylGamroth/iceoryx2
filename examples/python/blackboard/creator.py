@@ -28,6 +28,7 @@ INITIAL_VALUE_1 = c_double(1.1)
 service = (
     node.service_builder(iox2.ServiceName.new("My/Funk/ServiceName"))
     .blackboard_creator(BlackboardKey)
+    .max_writers(2)
     .add(key_0, c_int32(3))
     .add(key_1, INITIAL_VALUE_1)
     .create()

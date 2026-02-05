@@ -2726,6 +2726,37 @@ pub unsafe extern "C" fn iox2_config_defaults_blackboard_set_max_readers(
     config.value.as_mut().value.defaults.blackboard.max_readers = value;
 }
 
+/// Returns the maximum amount of supported [`iox2_writer_h`](crate::api::iox2_writer_h)s
+///
+/// # Safety
+///
+/// * `handle` - A valid non-owning [`iox2_config_h_ref`].
+#[no_mangle]
+pub unsafe extern "C" fn iox2_config_defaults_blackboard_max_writers(
+    handle: iox2_config_h_ref,
+) -> c_size_t {
+    handle.assert_non_null();
+
+    let config = &*handle.as_type();
+    config.value.as_ref().value.defaults.blackboard.max_writers
+}
+
+/// Sets the maximum amount of supported [`iox2_writer_h`](crate::api::iox2_writer_h)s
+///
+/// # Safety
+///
+/// * `handle` - A valid non-owning [`iox2_config_h_ref`].
+#[no_mangle]
+pub unsafe extern "C" fn iox2_config_defaults_blackboard_set_max_writers(
+    handle: iox2_config_h_ref,
+    value: c_size_t,
+) {
+    handle.assert_non_null();
+
+    let config = &mut *handle.as_type();
+    config.value.as_mut().value.defaults.blackboard.max_writers = value;
+}
+
 /// Returns the maximum amount of supported [`iox2_node_h`](crate::api::iox2_node_h)s. Defines indirectly
 /// how many processes can open the service at the same time.
 ///

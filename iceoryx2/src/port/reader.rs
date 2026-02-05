@@ -48,11 +48,10 @@ use core::hash::Hash;
 use core::marker::PhantomData;
 use core::ops::Deref;
 use iceoryx2_bb_concurrency::atomic::Ordering;
-use iceoryx2_bb_elementary::math::align;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
 use iceoryx2_bb_lock_free::mpmc::container::ContainerHandle;
 use iceoryx2_bb_lock_free::spmc::unrestricted_atomic::{
-    UnrestrictedAtomic, UnrestrictedAtomicMgmt,
+    UnrestrictedAtomic,
 };
 use iceoryx2_cal::dynamic_storage::DynamicStorage;
 use iceoryx2_cal::shared_memory::SharedMemory;
@@ -62,6 +61,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use super::port_identifiers::UniqueReaderId;
+use crate::port::blackboard_entry::{entry_layout, entry_mgmt_ptr, slot_ptr, unpack_latest, EntryLayout, EntryMgmt, Stamped, atomic_mgmt_and_data_ptr, load_stamped_bytes};
 
 /// A wrapper for the value returned by [`EntryHandle::get()`].
 pub struct BlackboardValue<ValueType: Copy> {
@@ -241,15 +241,32 @@ impl<
             msg,
         )?;
 
-        let atomic = (self
+        let entry_base = (self
             .shared_state
             .service_state
             .additional_resource
             .data
             .payload_start_address() as u64
-            + offset) as *const UnrestrictedAtomic<ValueType>;
+            + offset) as *mut u8;
 
-        Ok(EntryHandle::new(self.shared_state.clone(), atomic, offset))
+        let layout = entry_layout(
+            core::mem::size_of::<ValueType>(),
+            core::mem::align_of::<ValueType>(),
+            self.shared_state
+                .service_state
+                .static_config
+                .blackboard()
+                .max_writers(),
+        );
+        let entry_mgmt_ptr = unsafe { entry_mgmt_ptr(entry_base) as *const EntryMgmt };
+
+        Ok(EntryHandle::new(
+            self.shared_state.clone(),
+            entry_base as *const u8,
+            entry_mgmt_ptr,
+            layout,
+            offset,
+        ))
     }
 
     fn get_entry_offset(
@@ -323,8 +340,11 @@ pub struct EntryHandle<
     KeyType: Send + Sync + Eq + Clone + Debug + 'static + Hash + ZeroCopySend,
     ValueType: Copy,
 > {
-    atomic: *const UnrestrictedAtomic<ValueType>,
+    entry_base: *const u8,
+    entry_mgmt_ptr: *const EntryMgmt,
+    layout: EntryLayout,
     entry_id: EventId,
+    _value: PhantomData<ValueType>,
     _shared_state: Arc<ReaderSharedState<Service, KeyType>>,
 }
 
@@ -354,12 +374,17 @@ impl<
 {
     fn new(
         reader_state: Arc<ReaderSharedState<Service, KeyType>>,
-        atomic: *const UnrestrictedAtomic<ValueType>,
+        entry_base: *const u8,
+        entry_mgmt_ptr: *const EntryMgmt,
+        layout: EntryLayout,
         offset: u64,
     ) -> Self {
         Self {
-            atomic,
+            entry_base,
+            entry_mgmt_ptr,
+            layout,
             entry_id: EventId::new(offset as _),
+            _value: PhantomData,
             _shared_state: reader_state.clone(),
         }
     }
@@ -384,15 +409,19 @@ impl<
     /// # }
     /// ```
     pub fn get(&self) -> BlackboardValue<ValueType> {
-        unsafe {
-            let generation_counter = (*self.atomic).__internal_get_write_cell();
-            BlackboardValue {
-                value: (*self.atomic).load(),
-                // The generation_counter may be outdated as the blackboard value could have been
-                // updated between reading the counter and setting it here. This is not a problem,
-                // as is_up_to_date() returns a false positive but never a false negative, so no
-                // updates are lost.
-                generation_counter,
+        loop {
+            let latest = unsafe { (*self.entry_mgmt_ptr).load_latest() };
+            let (seq, slot) = unpack_latest(latest);
+            let slot_atomic = unsafe {
+                slot_ptr(self.entry_base as *mut u8, &self.layout, slot as usize)
+                    as *const UnrestrictedAtomic<Stamped<ValueType>>
+            };
+            let stamped = unsafe { (*slot_atomic).load() };
+            if stamped.seq == seq {
+                return BlackboardValue {
+                    value: stamped.value,
+                    generation_counter: seq,
+                };
             }
         }
     }
@@ -418,7 +447,9 @@ impl<
     /// # }
     /// ```
     pub fn is_up_to_date(&self, value: &BlackboardValue<ValueType>) -> bool {
-        unsafe { (*self.atomic).__internal_get_write_cell() == value.generation_counter }
+        let latest = unsafe { (*self.entry_mgmt_ptr).load_latest() };
+        let (seq, _) = unpack_latest(latest);
+        seq == value.generation_counter
     }
 
     /// Returns an ID corresponding to the entry which can be used in an event based communication
@@ -462,20 +493,29 @@ impl<Service: service::Service> Reader<Service, CustomKeyMarker> {
 
         let offset = self.get_entry_offset(&key_mem, value_type_details, msg)?;
 
-        let atomic_mgmt_ptr = (self
+        let entry_base = (self
             .shared_state
             .service_state
             .additional_resource
             .data
             .payload_start_address() as u64
-            + offset) as *const UnrestrictedAtomicMgmt;
+            + offset) as *mut u8;
 
-        let data_ptr = atomic_mgmt_ptr as usize + core::mem::size_of::<UnrestrictedAtomicMgmt>();
-        let data_ptr = align(data_ptr, value_type_details.alignment);
+        let layout = entry_layout(
+            value_type_details.size,
+            value_type_details.alignment,
+            self.shared_state
+                .service_state
+                .static_config
+                .blackboard()
+                .max_writers(),
+        );
+        let entry_mgmt_ptr = unsafe { entry_mgmt_ptr(entry_base) as *const EntryMgmt };
 
         Ok(__InternalEntryHandle {
-            atomic_mgmt_ptr,
-            data_ptr: data_ptr as *const u8,
+            entry_base: entry_base as *const u8,
+            entry_mgmt_ptr,
+            layout,
             entry_id: EventId::new(offset as _),
             _shared_state: self.shared_state.clone(),
         })
@@ -486,15 +526,15 @@ impl<Service: service::Service> Reader<Service, CustomKeyMarker> {
 /// where key and value type cannot be passed as generic.
 #[doc(hidden)]
 pub struct __InternalEntryHandle<Service: service::Service> {
-    atomic_mgmt_ptr: *const UnrestrictedAtomicMgmt,
-    data_ptr: *const u8,
+    entry_base: *const u8,
+    entry_mgmt_ptr: *const EntryMgmt,
+    layout: EntryLayout,
     entry_id: EventId,
     _shared_state: Arc<ReaderSharedState<Service, CustomKeyMarker>>,
 }
 
-// Safe since the pointer to the UnrestrictedAtomicMgmt and the data pointer don't change and the
-// UnrestrictedAtomicMgmt implements Send + Sync, and shared_state ensures the lifetime of the
-// UnrestrictedAtomicMgmt
+// Safe since the entry base pointer and entry management pointer don't change and shared_state
+// ensures their lifetime.
 unsafe impl<Service: service::Service> Send for __InternalEntryHandle<Service> {}
 unsafe impl<Service: service::Service> Sync for __InternalEntryHandle<Service> {}
 
@@ -513,15 +553,45 @@ impl<Service: service::Service> __InternalEntryHandle<Service> {
         value_alignment: usize,
         generation_counter_ptr: *mut u64,
     ) {
-        if !generation_counter_ptr.is_null() {
-            let generation_counter = (*self.atomic_mgmt_ptr).__internal_get_write_cell();
-            core::ptr::copy_nonoverlapping(&generation_counter, generation_counter_ptr, 1);
+        debug_assert!(value_size == self.layout.value_size);
+        debug_assert!(value_alignment == self.layout.value_alignment);
+
+        const STAMPED_STACK_MAX: usize = 256;
+        let mut stack_buf = [0u8; STAMPED_STACK_MAX];
+
+        loop {
+            let latest = (*self.entry_mgmt_ptr).load_latest();
+            let (seq, slot) = unpack_latest(latest);
+            let slot_ptr = slot_ptr(self.entry_base as *mut u8, &self.layout, slot as usize);
+            let (atomic_mgmt_ptr, data_ptr) = atomic_mgmt_and_data_ptr(slot_ptr, &self.layout);
+
+            let mut heap_buf;
+            let buf: &mut [u8] = if self.layout.stamped_size <= STAMPED_STACK_MAX {
+                &mut stack_buf[..self.layout.stamped_size]
+            } else {
+                heap_buf = vec![0u8; self.layout.stamped_size];
+                heap_buf.as_mut_slice()
+            };
+
+            load_stamped_bytes(atomic_mgmt_ptr, data_ptr, &self.layout, buf.as_mut_ptr());
+
+            let stamped_seq =
+                core::ptr::read_unaligned(buf.as_ptr() as *const u64);
+            if stamped_seq != seq {
+                continue;
+            }
+
+            if !generation_counter_ptr.is_null() {
+                core::ptr::copy_nonoverlapping(&seq, generation_counter_ptr, 1);
+            }
+
+            core::ptr::copy_nonoverlapping(
+                buf.as_ptr().add(self.layout.stamped_value_offset),
+                value_ptr,
+                self.layout.value_size,
+            );
+            break;
         }
-        // The generation_counter may be outdated as the blackboard value could have been
-        // updated between reading the counter and writing the value to the value_ptr. This
-        // is not a problem, as is_up_to_date() returns a false positive but never a false
-        // negative, so no updates are lost.
-        (*self.atomic_mgmt_ptr).load(value_ptr, value_size, value_alignment, self.data_ptr);
     }
 
     /// Returns an ID corresponding to the entry which can be used in an event based communication
@@ -533,6 +603,8 @@ impl<Service: service::Service> __InternalEntryHandle<Service> {
     /// Checks if the blackboard value that corresponds to the `generation_counter` is
     /// up-to-date.
     pub fn is_up_to_date(&self, generation_counter: u64) -> bool {
-        unsafe { (*self.atomic_mgmt_ptr).__internal_get_write_cell() == generation_counter }
+        let latest = unsafe { (*self.entry_mgmt_ptr).load_latest() };
+        let (seq, _) = unpack_latest(latest);
+        seq == generation_counter
     }
 }

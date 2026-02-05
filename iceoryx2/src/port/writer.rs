@@ -53,7 +53,6 @@ use core::hash::Hash;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use iceoryx2_bb_concurrency::atomic::Ordering;
-use iceoryx2_bb_elementary::math::align;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
 use iceoryx2_bb_lock_free::mpmc::container::ContainerHandle;
 use iceoryx2_bb_lock_free::spmc::unrestricted_atomic::{
@@ -67,6 +66,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use super::port_identifiers::UniqueWriterId;
+use crate::port::blackboard_entry::{entry_layout, entry_mgmt_ptr, slot_ptr, EntryLayout, EntryMgmt, Stamped};
 
 #[derive(Debug)]
 struct WriterSharedState<
@@ -74,6 +74,7 @@ struct WriterSharedState<
     KeyType: Send + Sync + Eq + Clone + Debug + 'static + Hash + ZeroCopySend,
 > {
     dynamic_writer_handle: Option<ContainerHandle>,
+    writer_index: u32,
     service_state: Arc<ServiceState<Service, BlackboardResources<Service>>>,
     _key: PhantomData<KeyType>,
 }
@@ -141,6 +142,7 @@ impl<
             shared_state: Arc::new(WriterSharedState {
                 service_state: service.clone(),
                 dynamic_writer_handle: None,
+                writer_index: 0,
                 _key: PhantomData,
             }),
             writer_id,
@@ -169,7 +171,10 @@ impl<
                 fail!(from origin, with WriterCreateError::InternalFailure,
                     "{} due to an internal failure.", msg);
             }
-            Some(writer_state) => writer_state.dynamic_writer_handle = Some(dynamic_writer_handle),
+            Some(writer_state) => {
+                writer_state.writer_index = dynamic_writer_handle.index();
+                writer_state.dynamic_writer_handle = Some(dynamic_writer_handle);
+            }
         }
         Ok(new_self)
     }
@@ -300,7 +305,9 @@ pub struct EntryHandleMut<
     KeyType: Send + Sync + Eq + Clone + Debug + 'static + Hash + ZeroCopySend,
     ValueType: Copy + 'static,
 > {
-    producer: Producer<'static, ValueType>,
+    producer: Producer<'static, Stamped<ValueType>>,
+    entry_mgmt_ptr: *const EntryMgmt,
+    slot_index: u32,
     entry_id: EventId,
     _shared_state: Arc<WriterSharedState<Service, KeyType>>,
 }
@@ -332,21 +339,46 @@ impl<
         writer_state: Arc<WriterSharedState<Service, KeyType>>,
         offset: u64,
     ) -> Result<Self, EntryHandleMutError> {
-        let atomic = (writer_state
+        let entry_base = (writer_state
             .service_state
             .additional_resource
             .data
             .payload_start_address() as u64
-            + offset) as *mut UnrestrictedAtomic<ValueType>;
-        match unsafe { (*atomic).acquire_producer() } {
+            + offset) as *mut u8;
+
+        let layout = entry_layout(
+            core::mem::size_of::<ValueType>(),
+            core::mem::align_of::<ValueType>(),
+            writer_state
+                .service_state
+                .static_config
+                .blackboard()
+                .max_writers(),
+        );
+
+        let slot_index = writer_state.writer_index as usize;
+        if slot_index >= layout.max_writers {
+            fatal_panic!(from "EntryHandleMut::new()",
+                "Writer slot index {} exceeds max writers {}.", slot_index, layout.max_writers);
+        }
+
+        let slot_atomic = unsafe {
+            slot_ptr(entry_base, &layout, slot_index) as *mut UnrestrictedAtomic<Stamped<ValueType>>
+        };
+        let entry_mgmt_ptr = unsafe { entry_mgmt_ptr(entry_base) as *const EntryMgmt };
+
+        match unsafe { (*slot_atomic).acquire_producer() } {
             None => Err(EntryHandleMutError::HandleAlreadyExists),
             Some(producer) => {
                 // change to static lifetime is safe since shared_state owns the service state and
                 // the dynamic writer handle + the struct fields are dropped in the same order as
                 // declared
-                let p: Producer<'static, ValueType> = unsafe { core::mem::transmute(producer) };
+                let p: Producer<'static, Stamped<ValueType>> =
+                    unsafe { core::mem::transmute(producer) };
                 Ok(Self {
                     producer: p,
+                    entry_mgmt_ptr,
+                    slot_index: writer_state.writer_index,
                     _shared_state: writer_state.clone(),
                     entry_id: EventId::new(offset as _),
                 })
@@ -374,7 +406,9 @@ impl<
     /// # }
     /// ```
     pub fn update_with_copy(&self, value: ValueType) {
-        self.producer.store(value);
+        let seq = unsafe { (*self.entry_mgmt_ptr).next_seq() };
+        self.producer.store(Stamped { seq, value });
+        unsafe { (*self.entry_mgmt_ptr).publish_latest(seq, self.slot_index) };
     }
 
     /// Consumes the [`EntryHandleMut`] and loans an uninitialized entry value that can be used to update without copy.
@@ -415,7 +449,8 @@ pub struct EntryValueUninit<
     KeyType: Send + Sync + Eq + Clone + Debug + 'static + Hash + ZeroCopySend,
     ValueType: Copy + 'static,
 > {
-    ptr: *mut ValueType,
+    stamped_ptr: *mut Stamped<ValueType>,
+    seq: u64,
     entry_handle_mut: EntryHandleMut<Service, KeyType, ValueType>,
 }
 
@@ -444,9 +479,15 @@ impl<
     > EntryValueUninit<Service, KeyType, ValueType>
 {
     fn new(entry_handle_mut: EntryHandleMut<Service, KeyType, ValueType>) -> Self {
-        let ptr = unsafe { entry_handle_mut.producer.__internal_get_ptr_to_write_cell() };
+        let seq = unsafe { (*entry_handle_mut.entry_mgmt_ptr).next_seq() };
+        let stamped_ptr =
+            unsafe { entry_handle_mut.producer.__internal_get_ptr_to_write_cell() };
+        unsafe {
+            (*stamped_ptr).seq = seq;
+        }
         Self {
-            ptr,
+            stamped_ptr,
+            seq,
             entry_handle_mut,
         }
     }
@@ -473,12 +514,16 @@ impl<
     /// # }
     /// ```
     pub fn update_with_copy(self, value: ValueType) -> EntryHandleMut<Service, KeyType, ValueType> {
-        unsafe { self.ptr.write(value) };
+        unsafe { (*self.stamped_ptr).value = value };
         unsafe {
             self.entry_handle_mut
                 .producer
                 .__internal_update_write_cell()
         };
+        unsafe {
+            (*self.entry_handle_mut.entry_mgmt_ptr)
+                .publish_latest(self.seq, self.entry_handle_mut.slot_index);
+        }
         self.entry_handle_mut
     }
 
@@ -532,9 +577,7 @@ impl<
     /// # }
     /// ```
     pub fn value_mut(&mut self) -> &mut MaybeUninit<ValueType> {
-        unsafe {
-            &mut *core::mem::transmute::<*mut ValueType, *mut MaybeUninit<ValueType>>(self.ptr)
-        }
+        unsafe { &mut *core::ptr::addr_of_mut!((*self.stamped_ptr).value).cast() }
     }
 
     /// Consumes the [`EntryValueUninit`], makes the new value accessible and returns the
@@ -568,6 +611,8 @@ impl<
         self.entry_handle_mut
             .producer
             .__internal_update_write_cell();
+        (*self.entry_handle_mut.entry_mgmt_ptr)
+            .publish_latest(self.seq, self.entry_handle_mut.slot_index);
         self.entry_handle_mut
     }
 }
@@ -606,20 +651,40 @@ impl<Service: service::Service> Writer<Service, CustomKeyMarker> {
 
         let offset = self.get_entry_offset(&key_mem, value_type_details, msg)?;
 
-        let atomic_mgmt_ptr = (self
+        let entry_base = (self
             .shared_state
             .service_state
             .additional_resource
             .data
             .payload_start_address() as u64
-            + offset) as *const UnrestrictedAtomicMgmt;
+            + offset) as *mut u8;
 
-        let data_ptr = atomic_mgmt_ptr as usize + core::mem::size_of::<UnrestrictedAtomicMgmt>();
-        let data_ptr = align(data_ptr, value_type_details.alignment);
+        let layout = entry_layout(
+            value_type_details.size,
+            value_type_details.alignment,
+            self.shared_state
+                .service_state
+                .static_config
+                .blackboard()
+                .max_writers(),
+        );
+        let slot_index = self.shared_state.writer_index as usize;
+        if slot_index >= layout.max_writers {
+            fatal_panic!(from "Writer::__internal_entry()",
+                "Writer slot index {} exceeds max writers {}.", slot_index, layout.max_writers);
+        }
+        let slot_ptr = unsafe { slot_ptr(entry_base, &layout, slot_index) };
+        let (atomic_mgmt_ptr, data_ptr) = unsafe {
+            crate::port::blackboard_entry::atomic_mgmt_and_data_ptr(slot_ptr, &layout)
+        };
+        let entry_mgmt_ptr = unsafe { entry_mgmt_ptr(entry_base) as *const EntryMgmt };
 
         match __InternalEntryHandleMut::new(
+            entry_mgmt_ptr,
             atomic_mgmt_ptr,
             data_ptr as *mut u8,
+            layout,
+            self.shared_state.writer_index,
             EventId::new(offset as _),
             self.shared_state.clone(),
         ) {
@@ -636,8 +701,12 @@ impl<Service: service::Service> Writer<Service, CustomKeyMarker> {
 /// where key and value type cannot be passed as generic.
 #[doc(hidden)]
 pub struct __InternalEntryHandleMut<Service: service::Service> {
+    entry_mgmt_ptr: *const EntryMgmt,
     atomic_mgmt_ptr: *const UnrestrictedAtomicMgmt,
     data_ptr: *mut u8,
+    layout: EntryLayout,
+    last_seq: core::sync::atomic::AtomicU64,
+    slot_index: u32,
     entry_id: EventId,
     _shared_state: Arc<WriterSharedState<Service, CustomKeyMarker>>,
 }
@@ -648,23 +717,29 @@ impl<Service: service::Service> Drop for __InternalEntryHandleMut<Service> {
     }
 }
 
-// Safe since the pointer to the UnrestrictedAtomicMgmt and the data pointer don't change and the
-// UnrestrictedAtomicMgmt implements Send + Sync, and shared_state ensures the lifetime of the
-// UnrestrictedAtomicMgmt
+// Safe since the entry management pointer and slot pointers don't change and shared_state ensures
+// their lifetime.
 unsafe impl<Service: service::Service> Send for __InternalEntryHandleMut<Service> {}
 unsafe impl<Service: service::Service> Sync for __InternalEntryHandleMut<Service> {}
 
 impl<Service: service::Service> __InternalEntryHandleMut<Service> {
     fn new(
+        entry_mgmt_ptr: *const EntryMgmt,
         atomic_mgmt_ptr: *const UnrestrictedAtomicMgmt,
         data_ptr: *mut u8,
+        layout: EntryLayout,
+        slot_index: u32,
         entry_id: EventId,
         writer_state: Arc<WriterSharedState<Service, CustomKeyMarker>>,
     ) -> Result<Self, EntryHandleMutError> {
         match unsafe { (*atomic_mgmt_ptr).__internal_acquire_producer() } {
             Ok(_) => Ok(Self {
+                entry_mgmt_ptr,
                 atomic_mgmt_ptr,
                 data_ptr,
+                layout,
+                last_seq: core::sync::atomic::AtomicU64::new(0),
+                slot_index,
                 entry_id,
                 _shared_state: writer_state.clone(),
             }),
@@ -700,13 +775,20 @@ impl<Service: service::Service> __InternalEntryHandleMut<Service> {
         value_size: usize,
         value_alignment: usize,
     ) -> *mut u8 {
-        unsafe {
+        debug_assert!(value_size == self.layout.value_size);
+        debug_assert!(value_alignment == self.layout.value_alignment);
+        let seq = unsafe { (*self.entry_mgmt_ptr).next_seq() };
+        self.last_seq
+            .store(seq, core::sync::atomic::Ordering::Relaxed);
+        let stamped_ptr = unsafe {
             (*self.atomic_mgmt_ptr).__internal_get_ptr_to_write_cell(
-                value_size,
-                value_alignment,
+                self.layout.stamped_size,
+                self.layout.stamped_alignment,
                 self.data_ptr,
             )
-        }
+        };
+        unsafe { (stamped_ptr as *mut u64).write(seq) };
+        unsafe { stamped_ptr.add(self.layout.stamped_value_offset) }
     }
 
     /// Updates the write cell of the underlying UnrestrictedAtomicMgmt.
@@ -717,6 +799,10 @@ impl<Service: service::Service> __InternalEntryHandleMut<Service> {
     ///   __internal_get_ptr_to_write_cell
     pub unsafe fn __internal_update_write_cell(&self) {
         unsafe { (*self.atomic_mgmt_ptr).__internal_update_write_cell() };
+        let seq = self
+            .last_seq
+            .load(core::sync::atomic::Ordering::Relaxed);
+        unsafe { (*self.entry_mgmt_ptr).publish_latest(seq, self.slot_index) };
     }
 }
 
@@ -741,13 +827,8 @@ impl<Service: service::Service> __InternalEntryValueUninit<Service> {
         value_size: usize,
         value_alignment: usize,
     ) -> Self {
-        let write_cell_ptr = unsafe {
-            (*entry_handle_mut.atomic_mgmt_ptr).__internal_get_ptr_to_write_cell(
-                value_size,
-                value_alignment,
-                entry_handle_mut.data_ptr,
-            )
-        };
+        let write_cell_ptr =
+            unsafe { entry_handle_mut.__internal_get_ptr_to_write_cell(value_size, value_alignment) };
         Self {
             write_cell_ptr,
             entry_handle_mut,
@@ -762,9 +843,7 @@ impl<Service: service::Service> __InternalEntryValueUninit<Service> {
     /// Makes new value accessible, consumes the __InternalEntryValueUninit and returns the original
     /// __InternalEntryHandleMut.
     pub fn update(self) -> __InternalEntryHandleMut<Service> {
-        unsafe {
-            (*self.entry_handle_mut.atomic_mgmt_ptr).__internal_update_write_cell();
-        }
+        unsafe { self.entry_handle_mut.__internal_update_write_cell() };
         self.entry_handle_mut
     }
 

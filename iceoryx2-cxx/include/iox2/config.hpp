@@ -365,6 +365,10 @@ class Blackboard {
     auto max_readers() && -> size_t;
     /// Set the maximum amount of supported [`Reader`]s
     void set_max_readers(size_t value) &&;
+    /// The maximum amount of supported [`Writer`]s
+    auto max_writers() && -> size_t;
+    /// Set the maximum amount of supported [`Writer`]s
+    void set_max_writers(size_t value) &&;
     /// The maximum amount of supported [`Node`]s. Defines indirectly how many
     /// processes can open the service at the same time.
     auto max_nodes() && -> size_t;

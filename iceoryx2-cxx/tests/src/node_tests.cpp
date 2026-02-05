@@ -43,13 +43,14 @@ TYPED_TEST(NodeTest, created_nodes_can_be_listed) {
 
     auto node_name_1 = NodeName::create("Nala does not like water.").value();
     auto node_name_2 = NodeName::create("Nala does not like paprika.").value();
+    auto config = iox2_testing::generate_isolated_config();
 
     {
-        auto sut_1 = NodeBuilder().name(node_name_1).create<SERVICE_TYPE>().value();
-        auto sut_2 = NodeBuilder().name(node_name_2).create<SERVICE_TYPE>().value();
+        auto sut_1 = NodeBuilder().config(config).name(node_name_1).create<SERVICE_TYPE>().value();
+        auto sut_2 = NodeBuilder().config(config).name(node_name_2).create<SERVICE_TYPE>().value();
 
         std::vector<NodeName> nodes;
-        auto result = Node<SERVICE_TYPE>::list(Config::global_config(), [&](auto node_state) -> auto {
+        auto result = Node<SERVICE_TYPE>::list(config.view(), [&](auto node_state) -> auto {
             node_state.alive([&](auto& view) -> auto { nodes.push_back(view.details()->name()); });
             return CallbackProgression::Continue;
         });
@@ -70,7 +71,7 @@ TYPED_TEST(NodeTest, created_nodes_can_be_listed) {
     }
 
     uint64_t counter = 0;
-    auto result = Node<SERVICE_TYPE>::list(Config::global_config(), [&](const auto&) -> auto {
+    auto result = Node<SERVICE_TYPE>::list(config.view(), [&](const auto&) -> auto {
         counter++;
         return CallbackProgression::Continue;
     });

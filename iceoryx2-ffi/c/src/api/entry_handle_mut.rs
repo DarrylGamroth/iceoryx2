@@ -45,7 +45,7 @@ impl EntryHandleMutUnion {
 #[repr(C)]
 #[repr(align(8))] // alignment of Option<EntryHandleMutUnion>
 pub struct iox2_entry_handle_mut_storage_t {
-    internal: [u8; 40], // magic number obtained with size_of::<Option<EntryHandleMutUnion>>()
+    internal: [u8; 144], // magic number obtained with size_of::<Option<EntryHandleMutUnion>>()
 }
 
 #[repr(C)]

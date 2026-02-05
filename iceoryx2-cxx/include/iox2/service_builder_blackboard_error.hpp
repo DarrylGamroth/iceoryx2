@@ -32,6 +32,8 @@ enum class BlackboardOpenError : uint8_t {
     IncompatibleMessagingPattern,
     /// The [`Service`] supports less [`Reader`](crate::port::reader::Reader)s than requested.
     DoesNotSupportRequestedAmountOfReaders,
+    /// The [`Service`] supports less [`Writer`](crate::port::writer::Writer)s than requested.
+    DoesNotSupportRequestedAmountOfWriters,
     /// The process has not enough permissions to open the [`Service`]
     InsufficientPermissions,
     /// The [`Service`]s creation timeout has passed and it is still not initialized. Can be caused

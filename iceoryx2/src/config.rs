@@ -477,6 +477,8 @@ impl Default for RequestResonse {
 pub struct Blackboard {
     /// The maximum amount of supported [`Reader`](crate::port::reader::Reader)s.
     pub max_readers: usize,
+    /// The maximum amount of supported [`Writer`](crate::port::writer::Writer)s.
+    pub max_writers: usize,
     /// The maximum amount of supported [`Node`](crate::node::Node)s. Defines indirectly how many
     /// processes can open the service at the same time.
     pub max_nodes: usize,
@@ -486,6 +488,7 @@ impl Default for Blackboard {
     fn default() -> Self {
         Self {
             max_readers: 8,
+            max_writers: 1,
             max_nodes: 20,
         }
     }

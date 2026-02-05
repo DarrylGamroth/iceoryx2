@@ -41,8 +41,8 @@
 //!
 //! ### Blackboard
 //!
-//! Realizes a key-value store in shared memory which can be modified by one
-//! [`Writer`](crate::port::writer::Writer) and read by many
+//! Realizes a key-value store in shared memory which can be modified by multiple
+//! [`Writer`](crate::port::writer::Writer)s and read by many
 //! [`Reader`](crate::port::reader::Reader)s. Updates and reads are made on a key basis, not
 //! on the entire shared memory.
 

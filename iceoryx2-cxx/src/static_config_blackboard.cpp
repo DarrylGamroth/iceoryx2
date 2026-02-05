@@ -25,6 +25,10 @@ auto StaticConfigBlackboard::max_readers() const -> size_t {
     return m_value.max_readers;
 }
 
+auto StaticConfigBlackboard::max_writers() const -> size_t {
+    return m_value.max_writers;
+}
+
 auto StaticConfigBlackboard::type_details() const -> TypeDetail {
     return TypeDetail(m_value.type_details);
 }

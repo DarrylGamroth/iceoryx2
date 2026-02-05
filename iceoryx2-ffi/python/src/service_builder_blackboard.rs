@@ -167,6 +167,22 @@ impl ServiceBuilderBlackboardCreator {
         }
     }
 
+    /// Defines how many `Writer`s shall be supported at most.
+    pub fn max_writers(&mut self, value: usize) -> Self {
+        match &mut *self.value.lock() {
+            ServiceBuilderBlackboardCreatorType::Ipc(ref mut v) => {
+                let this = v.take().unwrap();
+                let this = this.max_writers(value);
+                self.clone_ipc(this)
+            }
+            ServiceBuilderBlackboardCreatorType::Local(ref mut v) => {
+                let this = v.take().unwrap();
+                let this = this.max_writers(value);
+                self.clone_local(this)
+            }
+        }
+    }
+
     /// Defines how many `Node`s shall be able to open the `Service` in parallel.
     pub fn max_nodes(&mut self, value: usize) -> Self {
         match &mut *self.value.lock() {
@@ -347,6 +363,22 @@ impl ServiceBuilderBlackboardOpener {
             ServiceBuilderBlackboardOpenerType::Local(ref mut v) => {
                 let this = v.take().unwrap();
                 let this = this.max_readers(value);
+                self.clone_local(this)
+            }
+        }
+    }
+
+    /// Defines how many `Writer`s must be at least supported.
+    pub fn max_writers(&mut self, value: usize) -> Self {
+        match &mut *self.value.lock() {
+            ServiceBuilderBlackboardOpenerType::Ipc(ref mut v) => {
+                let this = v.take().unwrap();
+                let this = this.max_writers(value);
+                self.clone_ipc(this)
+            }
+            ServiceBuilderBlackboardOpenerType::Local(ref mut v) => {
+                let this = v.take().unwrap();
+                let this = this.max_writers(value);
                 self.clone_local(this)
             }
         }

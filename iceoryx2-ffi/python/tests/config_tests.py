@@ -426,6 +426,13 @@ def test_defaults_blackboard_max_readers_can_be_set() -> None:
     assert sut.defaults.blackboard.max_readers == value
 
 
+def test_defaults_blackboard_max_writers_can_be_set() -> None:
+    sut = iox2.config.default()
+    value = 7
+    sut.defaults.blackboard.max_writers = value
+    assert sut.defaults.blackboard.max_writers == value
+
+
 def test_defaults_blackboard_max_nodes_can_be_set() -> None:
     sut = iox2.config.default()
     value = 35

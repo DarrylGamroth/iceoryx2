@@ -36,6 +36,12 @@ impl StaticConfigBlackboard {
     }
 
     #[getter]
+    /// Returns the maximum supported amount of `Writer` ports
+    pub fn max_writers(&self) -> usize {
+        self.0.max_writers()
+    }
+
+    #[getter]
     /// Returns the type details of the `Service`.
     pub fn type_details(&self) -> TypeDetail {
         TypeDetail(*self.0.type_details())

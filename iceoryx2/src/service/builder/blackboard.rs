@@ -31,6 +31,7 @@ use iceoryx2_bb_derive_macros::ZeroCopySend;
 use iceoryx2_bb_elementary::static_assert::static_assert_eq;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
 use iceoryx2_bb_lock_free::spmc::unrestricted_atomic::*;
+use crate::port::blackboard_entry::{entry_layout, EntryLayout, EntryMgmt, MAX_WRITER_SLOTS, Stamped};
 use iceoryx2_bb_memory::bump_allocator::BumpAllocator;
 use iceoryx2_cal::dynamic_storage::DynamicStorageCreateError;
 use iceoryx2_cal::shared_memory::{SharedMemory, SharedMemoryBuilder};
@@ -76,6 +77,8 @@ pub enum BlackboardOpenError {
     IncompatibleMessagingPattern,
     /// The [`Service`] supports less [`Reader`](crate::port::reader::Reader)s than requested.
     DoesNotSupportRequestedAmountOfReaders,
+    /// The [`Service`] supports less [`Writer`](crate::port::writer::Writer)s than requested.
+    DoesNotSupportRequestedAmountOfWriters,
     /// The process has not enough permissions to open the [`Service`]
     InsufficientPermissions,
     /// The [`Service`]s creation timeout has passed and it is still not initialized. Can be caused
@@ -274,9 +277,10 @@ impl<const CAPACITY: usize> KeyMemory<CAPACITY> {
 pub struct BuilderInternals {
     key: KeyMemory<MAX_BLACKBOARD_KEY_SIZE>,
     value_type_details: TypeDetail,
-    value_writer: Box<dyn FnMut(*mut u8)>,
-    internal_value_size: usize,
-    internal_value_alignment: usize,
+    value_writer: Box<dyn FnMut(*mut u8, &EntryLayout)>,
+    value_size: usize,
+    value_alignment: usize,
+    entry_layout: Option<EntryLayout>,
     internal_value_cleanup_callback: Box<dyn FnMut()>,
 }
 
@@ -293,10 +297,10 @@ impl Drop for BuilderInternals {
 }
 
 impl BuilderInternals {
-    pub fn new(
+    fn new(
         key: KeyMemory<MAX_BLACKBOARD_KEY_SIZE>,
         value_type_details: TypeDetail,
-        value_writer: Box<dyn FnMut(*mut u8)>,
+        value_writer: Box<dyn FnMut(*mut u8, &EntryLayout)>,
         value_size: usize,
         value_alignment: usize,
         value_cleanup_callback: Box<dyn FnMut()>,
@@ -305,8 +309,9 @@ impl BuilderInternals {
             key,
             value_type_details,
             value_writer,
-            internal_value_size: value_size,
-            internal_value_alignment: value_alignment,
+            value_size,
+            value_alignment,
+            entry_layout: None,
             internal_value_cleanup_callback: value_cleanup_callback,
         }
     }
@@ -355,6 +360,7 @@ struct Builder<
 > {
     base: builder::BuilderWithServiceType<ServiceType>,
     verify_max_readers: bool,
+    verify_max_writers: bool,
     verify_max_nodes: bool,
     internals: Vec<BuilderInternals>,
     override_key_type: Option<TypeDetail>,
@@ -370,10 +376,11 @@ impl<
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "Builder<{}, {}> {{ verify_max_readers: {}, verify_max_nodes: {}, internals: {:?} }}",
+            "Builder<{}, {}> {{ verify_max_readers: {}, verify_max_writers: {}, verify_max_nodes: {}, internals: {:?} }}",
             core::any::type_name::<KeyType>(),
             core::any::type_name::<ServiceType>(),
             self.verify_max_readers,
+            self.verify_max_writers,
             self.verify_max_nodes,
             self.internals
         )
@@ -389,6 +396,7 @@ impl<
         let mut new_self = Self {
             base,
             verify_max_readers: false,
+            verify_max_writers: false,
             verify_max_nodes: false,
             internals: Vec::<BuilderInternals>::new(),
             override_key_type: None,
@@ -463,6 +471,14 @@ impl<
         self.verify_max_readers = true;
     }
 
+    /// If the [`Service`] is created it defines how many [`Writer`](crate::port::writer::Writer)s
+    /// shall be supported at most. If an existing [`Service`] is opened it defines how many
+    /// [`Writer`](crate::port::writer::Writer)s must be at least supported.
+    fn max_writers(&mut self, value: usize) {
+        self.config_details_mut().max_writers = value;
+        self.verify_max_writers = true;
+    }
+
     /// If the [`Service`] is created it defines how many [`Node`](crate::node::Node)s shall
     /// be able to open it in parallel. If an existing [`Service`] is opened it defines how many
     /// [`Node`](crate::node::Node)s must be at least supported.
@@ -502,6 +518,12 @@ impl<
         self
     }
 
+    /// Defines how many [`Writer`](crate::port::writer::Writer)s shall be supported at most.
+    pub fn max_writers(mut self, value: usize) -> Self {
+        self.builder.max_writers(value);
+        self
+    }
+
     /// Defines how many [`Node`](crate::node::Node)s shall be able to open it in parallel.
     pub fn max_nodes(mut self, value: usize) -> Self {
         self.builder.max_nodes(value);
@@ -527,13 +549,22 @@ impl<
             value_type_details: TypeDetail::new::<ValueType>(
                 message_type_details::TypeVariant::FixedSize,
             ),
-            value_writer: Box::new(move |mem: *mut u8| {
-                let mem: *mut UnrestrictedAtomic<ValueType> =
-                    mem as *mut UnrestrictedAtomic<ValueType>;
-                unsafe { mem.write(UnrestrictedAtomic::<ValueType>::new(value)) };
+            value_writer: Box::new(move |entry_mem: *mut u8, layout: &EntryLayout| {
+                let entry_mgmt = entry_mem as *mut EntryMgmt;
+                unsafe { entry_mgmt.write(EntryMgmt::new()) };
+                for slot in 0..layout.max_writers {
+                    let slot_ptr = unsafe {
+                        entry_mem.add(layout.slots_offset + slot * layout.slot_stride)
+                            as *mut UnrestrictedAtomic<Stamped<ValueType>>
+                    };
+                    unsafe {
+                        slot_ptr.write(UnrestrictedAtomic::new(Stamped { seq: 0, value }))
+                    };
+                }
             }),
-            internal_value_size: core::mem::size_of::<UnrestrictedAtomic<ValueType>>(),
-            internal_value_alignment: core::mem::align_of::<UnrestrictedAtomic<ValueType>>(),
+            value_size: core::mem::size_of::<ValueType>(),
+            value_alignment: core::mem::align_of::<ValueType>(),
+            entry_layout: None,
             internal_value_cleanup_callback: Box::new(|| {}),
         };
         self.builder.internals.push(internals);
@@ -557,6 +588,20 @@ impl<
         if settings.max_readers == 0 {
             warn!(from origin, "Setting the maximum amount of readers to 0 is not supported. Adjust it to 1, the smallest supported value.");
             settings.max_readers = 1;
+        }
+
+        if settings.max_writers == 0 {
+            warn!(from origin, "Setting the maximum amount of writers to 0 is not supported. Adjust it to 1, the smallest supported value.");
+            settings.max_writers = 1;
+        }
+        if settings.max_writers > MAX_WRITER_SLOTS {
+            warn!(
+                from origin,
+                "Setting the maximum amount of writers to {} exceeds the supported limit. Adjust it to {}.",
+                settings.max_writers,
+                MAX_WRITER_SLOTS
+            );
+            settings.max_writers = MAX_WRITER_SLOTS;
         }
 
         if settings.max_nodes == 0 {
@@ -622,12 +667,12 @@ impl<
                     }
                 };
 
-                let blackboard_config = self.builder.base.service_config.blackboard();
+                let blackboard_config = self.builder.base.service_config.blackboard().clone();
 
                 // create dynamic config
                 let dynamic_config_setting = DynamicConfigSettings {
                     number_of_readers: blackboard_config.max_readers,
-                    number_of_writers: 1,
+                    number_of_writers: blackboard_config.max_writers,
                 };
 
                 let dynamic_config = match self.builder.base.create_dynamic_config_storage(
@@ -661,8 +706,14 @@ impl<
                     fail!(from self,  with BlackboardCreateError::NoEntriesProvided,
                         "{} without entries. At least one key-value pair is required.", msg);
                 }
-                for i in &self.builder.internals {
-                    payload_size += i.internal_value_size + i.internal_value_alignment - 1;
+                for internal in &mut self.builder.internals {
+                    let layout = entry_layout(
+                        internal.value_size,
+                        internal.value_alignment,
+                        blackboard_config.max_writers,
+                    );
+                    internal.entry_layout = Some(layout);
+                    payload_size += layout.entry_size + layout.entry_alignment - 1;
                 }
                 let payload_shm = match <<ServiceType::BlackboardPayload as SharedMemory<
                     iceoryx2_cal::shm_allocator::bump_allocator::BumpAllocator,
@@ -715,7 +766,14 @@ impl<
                             }
                             for i in 0..capacity {
                                 // write value passed to add() to payload_shm
-                                let mem = match payload_shm.allocate(unsafe { Layout::from_size_align_unchecked(self.builder.internals[i].internal_value_size, self.builder.internals[i].internal_value_alignment) })
+                                let layout = match self.builder.internals[i].entry_layout {
+                                    Some(layout) => layout,
+                                    None => {
+                                        error!(from self, "Entry layout not initialized.");
+                                        return false
+                                    }
+                                };
+                                let mem = match payload_shm.allocate(unsafe { Layout::from_size_align_unchecked(layout.entry_size, layout.entry_alignment) })
                                 {
                                     Ok(m) => m,
                                     Err(_) => {
@@ -723,7 +781,7 @@ impl<
                                         return false
                                     }
                                 };
-                                (*self.builder.internals[i].value_writer)(mem.data_ptr);
+                                (*self.builder.internals[i].value_writer)(mem.data_ptr, &layout);
                                 // write offset to value in payload_shm to entries vector
                                 let res = entry.entries.push(Entry{type_details: self.builder.internals[i].value_type_details, offset: AtomicU64::new(mem.offset.offset() as u64)});
                                 if res.is_err() {
@@ -814,20 +872,28 @@ impl<ServiceType: service::Service> Creator<CustomKeyMarker, ServiceType> {
             Err(_) => fatal_panic!(from self, "The key type has the wrong size/alignment!"),
         };
 
-        let value_writer = Box::new(move |raw_memory_ptr: *mut u8| {
-            let ptrs = __internal_calculate_atomic_mgmt_and_payload_ptr(
-                raw_memory_ptr,
-                value_details.alignment,
-            );
-            core::ptr::copy_nonoverlapping(value, ptrs.atomic_payload_ptr, value_details.size);
+        let value_writer = Box::new(move |entry_mem: *mut u8, layout: &EntryLayout| {
+            let entry_mgmt = entry_mem as *mut EntryMgmt;
+            unsafe { entry_mgmt.write(EntryMgmt::new()) };
+            for slot in 0..layout.max_writers {
+                let slot_ptr = unsafe {
+                    entry_mem.add(layout.slots_offset + slot * layout.slot_stride)
+                };
+                let (mgmt_ptr, data_ptr) =
+                    unsafe { crate::port::blackboard_entry::atomic_mgmt_and_data_ptr(slot_ptr, layout) };
+                unsafe { mgmt_ptr.write(UnrestrictedAtomicMgmt::new()) };
+                unsafe { (data_ptr as *mut u64).write(0) };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        value,
+                        data_ptr.add(layout.stamped_value_offset),
+                        layout.value_size,
+                    )
+                };
+            }
         });
-        let value_size = UnrestrictedAtomicMgmt::__internal_get_unrestricted_atomic_size(
-            value_details.size,
-            value_details.alignment,
-        );
-        let value_alignment = UnrestrictedAtomicMgmt::__internal_get_unrestricted_atomic_alignment(
-            value_details.alignment,
-        );
+        let value_size = value_details.size;
+        let value_alignment = value_details.alignment;
 
         let internals = BuilderInternals::new(
             key_mem,
@@ -873,6 +939,12 @@ impl<
         self
     }
 
+    /// Defines how many [`Writer`](crate::port::writer::Writer)s must be at least supported.
+    pub fn max_writers(mut self, value: usize) -> Self {
+        self.builder.max_writers(value);
+        self
+    }
+
     /// Defines how many [`Node`](crate::node::Node)s must be at least supported.
     pub fn max_nodes(mut self, value: usize) -> Self {
         self.builder.max_nodes(value);
@@ -908,6 +980,14 @@ impl<
             fail!(from self, with BlackboardOpenError::DoesNotSupportRequestedAmountOfReaders,
                                 "{} since the service supports only {} readers but a support of {} readers was requested.",
                                 msg, existing_settings.max_readers, required_settings.max_readers);
+        }
+
+        if self.builder.verify_max_writers
+            && existing_settings.max_writers < required_settings.max_writers
+        {
+            fail!(from self, with BlackboardOpenError::DoesNotSupportRequestedAmountOfWriters,
+                                "{} since the service supports only {} writers but a support of {} writers was requested.",
+                                msg, existing_settings.max_writers, required_settings.max_writers);
         }
 
         if self.builder.verify_max_nodes

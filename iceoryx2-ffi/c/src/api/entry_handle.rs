@@ -45,7 +45,7 @@ impl EntryHandleUnion {
 #[repr(C)]
 #[repr(align(8))] // alignment of Option<EntryHandleUnion>
 pub struct iox2_entry_handle_storage_t {
-    internal: [u8; 40], // magic number obtained with size_of::<Option<EntryHandleUnion>>()
+    internal: [u8; 120], // magic number obtained with size_of::<Option<EntryHandleUnion>>()
 }
 
 #[repr(C)]

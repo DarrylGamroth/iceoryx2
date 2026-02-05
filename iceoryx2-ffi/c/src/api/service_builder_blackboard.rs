@@ -62,6 +62,8 @@ pub enum iox2_blackboard_open_error_e {
     O_INCOMPATIBLE_MESSAGING_PATTERN,
     #[CStr = "does not support requested amount of readers"]
     O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_READERS,
+    #[CStr = "does not support requested amount of writers"]
+    O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_WRITERS,
     #[CStr = "insufficient permissions"]
     O_INSUFFICIENT_PERMISSIONS,
     #[CStr = "hangs in creation"]
@@ -114,6 +116,9 @@ impl IntoCInt for BlackboardOpenError {
             }
             BlackboardOpenError::DoesNotSupportRequestedAmountOfReaders => {
                 iox2_blackboard_open_error_e::O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_READERS
+            }
+            BlackboardOpenError::DoesNotSupportRequestedAmountOfWriters => {
+                iox2_blackboard_open_error_e::O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_WRITERS
             }
             BlackboardOpenError::InsufficientPermissions => {
                 iox2_blackboard_open_error_e::O_INSUFFICIENT_PERMISSIONS
@@ -472,6 +477,92 @@ pub unsafe extern "C" fn iox2_service_builder_blackboard_opener_set_max_readers(
             let service_builder = ManuallyDrop::into_inner(service_builder.blackboard_opener);
             service_builder_struct.set(ServiceBuilderUnion::new_local_blackboard_opener(
                 service_builder.max_readers(value),
+            ));
+        }
+    }
+}
+
+/// Sets the max writers for the creator
+///
+/// # Arguments
+///
+/// * `service_builder_handle` - Must be a valid [`iox2_service_builder_blackboard_creator_h_ref`]
+///   obtained by
+///   [`iox2_service_builder_blackboard_creator`](crate::iox2_service_builder_blackboard_creator).
+/// * `value` - The value to set the max writers to
+///
+/// # Safety
+///
+/// * `service_builder_handle` must be a valid and non-null handle
+#[no_mangle]
+pub unsafe extern "C" fn iox2_service_builder_blackboard_creator_set_max_writers(
+    service_builder_handle: iox2_service_builder_blackboard_creator_h_ref,
+    value: c_size_t,
+) {
+    service_builder_handle.assert_non_null();
+
+    let service_builder_struct = unsafe { &mut *service_builder_handle.as_type() };
+
+    match service_builder_struct.service_type {
+        iox2_service_type_e::IPC => {
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+
+            let service_builder = ManuallyDrop::into_inner(service_builder.blackboard_creator);
+            service_builder_struct.set(ServiceBuilderUnion::new_ipc_blackboard_creator(
+                service_builder.max_writers(value),
+            ));
+        }
+        iox2_service_type_e::LOCAL => {
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().local);
+
+            let service_builder = ManuallyDrop::into_inner(service_builder.blackboard_creator);
+            service_builder_struct.set(ServiceBuilderUnion::new_local_blackboard_creator(
+                service_builder.max_writers(value),
+            ));
+        }
+    }
+}
+
+/// Sets the max writers for the opener
+///
+/// # Arguments
+///
+/// * `service_builder_handle` - Must be a valid [`iox2_service_builder_blackboard_opener_h_ref`]
+///   obtained by
+///   [`iox2_service_builder_blackboard_opener`](crate::iox2_service_builder_blackboard_opener).
+/// * `value` - The value to set the max writers to
+///
+/// # Safety
+///
+/// * `service_builder_handle` must be a valid and non-null handle
+#[no_mangle]
+pub unsafe extern "C" fn iox2_service_builder_blackboard_opener_set_max_writers(
+    service_builder_handle: iox2_service_builder_blackboard_opener_h_ref,
+    value: c_size_t,
+) {
+    service_builder_handle.assert_non_null();
+
+    let service_builder_struct = unsafe { &mut *service_builder_handle.as_type() };
+
+    match service_builder_struct.service_type {
+        iox2_service_type_e::IPC => {
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+
+            let service_builder = ManuallyDrop::into_inner(service_builder.blackboard_opener);
+            service_builder_struct.set(ServiceBuilderUnion::new_ipc_blackboard_opener(
+                service_builder.max_writers(value),
+            ));
+        }
+        iox2_service_type_e::LOCAL => {
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().local);
+
+            let service_builder = ManuallyDrop::into_inner(service_builder.blackboard_opener);
+            service_builder_struct.set(ServiceBuilderUnion::new_local_blackboard_opener(
+                service_builder.max_writers(value),
             ));
         }
     }

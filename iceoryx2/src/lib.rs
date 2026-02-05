@@ -258,8 +258,8 @@
 //!
 //! ## Blackboard
 //!
-//! Explore a simple blackboard setup with one key-value pair which is continuously updated by the
-//! writer and read by the reader until the processes are gracefully terminated with `CTRL+C`.
+//! Explore a simple blackboard setup with one key-value pair which is continuously updated by one
+//! or more writers and read by readers until the processes are gracefully terminated with `CTRL+C`.
 //!
 //! **Reader (Process 1)**
 //!
@@ -277,6 +277,7 @@
 //! let service = node
 //!     .service_builder(&"My/Funk/ServiceName".try_into()?)
 //!     .blackboard_creator::<KeyType>()
+//!     .max_writers(2)
 //!     .add::<u64>(0, 0)
 //!     .create()?;
 //!

@@ -45,6 +45,13 @@ class ServiceBuilderBlackboardCreator {
     IOX2_BUILDER_OPTIONAL(uint64_t, max_readers);
 #endif
 
+    /// Defines how many [`Writer`]s shall be supported at most.
+#ifdef DOXYGEN_MACRO_FIX
+    auto max_writers(const uint64_t value) -> decltype(auto);
+#else
+    IOX2_BUILDER_OPTIONAL(uint64_t, max_writers);
+#endif
+
     /// Defines how many [`Node`]s shall be able to open it in parallel.
 #ifdef DOXYGEN_MACRO_FIX
     auto max_nodes(const uint64_t value) -> decltype(auto);
@@ -88,6 +95,13 @@ class ServiceBuilderBlackboardOpener {
     auto max_readers(const uint64_t value) -> decltype(auto);
 #else
     IOX2_BUILDER_OPTIONAL(uint64_t, max_readers);
+#endif
+
+    /// Defines how many [`Writer`]s must be at least supported.
+#ifdef DOXYGEN_MACRO_FIX
+    auto max_writers(const uint64_t value) -> decltype(auto);
+#else
+    IOX2_BUILDER_OPTIONAL(uint64_t, max_writers);
 #endif
 
     /// Defines how many [`Node`]s must be at least supported.
@@ -142,6 +156,9 @@ template <typename KeyType, ServiceType S>
 inline void ServiceBuilderBlackboardCreator<KeyType, S>::set_parameters() {
     if (m_max_readers.has_value()) {
         iox2_service_builder_blackboard_creator_set_max_readers(&m_handle, m_max_readers.value());
+    }
+    if (m_max_writers.has_value()) {
+        iox2_service_builder_blackboard_creator_set_max_writers(&m_handle, m_max_writers.value());
     }
     if (m_max_nodes.has_value()) {
         iox2_service_builder_blackboard_creator_set_max_nodes(&m_handle, m_max_nodes.value());
@@ -230,6 +247,9 @@ template <typename KeyType, ServiceType S>
 inline void ServiceBuilderBlackboardOpener<KeyType, S>::set_parameters() {
     if (m_max_readers.has_value()) {
         iox2_service_builder_blackboard_opener_set_max_readers(&m_handle, m_max_readers.value());
+    }
+    if (m_max_writers.has_value()) {
+        iox2_service_builder_blackboard_opener_set_max_writers(&m_handle, m_max_writers.value());
     }
     if (m_max_nodes.has_value()) {
         iox2_service_builder_blackboard_opener_set_max_nodes(&m_handle, m_max_nodes.value());

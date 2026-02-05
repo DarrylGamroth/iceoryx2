@@ -24,9 +24,9 @@ sharing a global configuration or state, for example.
 > able to store and retrieve keys in the blackboard, an equality comparison
 > function for the key must be provided.
 
-In this example, one
-writer updates the values in the blackboard every second and a reader reads and
-prints them to the console.
+In this example, one writer updates the values in the blackboard every second
+and a reader reads and prints them to the console. If you want multiple writers
+to update the same keys, set `max_writers` when creating the service.
 
 ## How to Build
 
@@ -57,6 +57,7 @@ terminals and execute the following commands:
 ./target/ff/cc/build/examples/c/blackboard/example_c_opener
 ```
 
-Feel free to run multiple instances of reader processes simultaneously but note
-that the `blackboard_creator` must run first to create the blackboard service
-with the key-value pairs and that there can be only one writer.
+Feel free to run multiple instances of reader processes simultaneously. The
+`blackboard_creator` must run first to create the blackboard service with the
+key-value pairs. By default there is only one writer; set `max_writers` on the
+creator (and optionally on the opener as a requirement) to allow more.

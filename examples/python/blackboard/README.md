@@ -29,7 +29,8 @@ sharing a global configuration or state, for example.
 > `__eq__`.
 
 In this example, one writer updates the values in the blackboard every second
-and a reader reads and prints them to the console.
+and a reader reads and prints them to the console. If you want multiple writers
+to update the same keys, set `max_writers` when creating the service.
 
 ## How to Build
 
@@ -65,6 +66,7 @@ poetry --project iceoryx2-ffi/python run python examples/python/blackboard/creat
 poetry --project iceoryx2-ffi/python run python examples/python/blackboard/opener.py
 ```
 
-Feel free to run multiple instances of reader processes simultaneously but note
-that the `blackboard_creator` must run first to create the blackboard service
-with the key-value pairs and that there can be only one writer.
+Feel free to run multiple instances of reader processes simultaneously. The
+`blackboard_creator` must run first to create the blackboard service with the
+key-value pairs. By default there is only one writer; set `max_writers` on the
+creator (and optionally on the opener as a requirement) to allow more.

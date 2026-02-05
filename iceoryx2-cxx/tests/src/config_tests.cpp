@@ -422,4 +422,12 @@ TEST(Config, defaults_blackboard_max_subscribers) {
     config.defaults().blackboard().set_max_readers(test_value);
     ASSERT_THAT(config.defaults().blackboard().max_readers(), Eq(test_value));
 }
+
+TEST(Config, defaults_blackboard_max_writers) {
+    const auto test_value = 7;
+    auto config = Config();
+
+    config.defaults().blackboard().set_max_writers(test_value);
+    ASSERT_THAT(config.defaults().blackboard().max_writers(), Eq(test_value));
+}
 } // namespace

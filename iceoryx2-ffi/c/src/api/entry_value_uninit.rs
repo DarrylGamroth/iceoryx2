@@ -49,7 +49,7 @@ impl EntryValueUninitUnion {
 #[repr(C)]
 #[repr(align(8))] // alignment of Option<EntryValueUninitUnion>
 pub struct iox2_entry_value_uninit_storage_t {
-    internal: [u8; 48], // magic number obtained with size_of::<Option<EntryValueUninitUnion>>()
+    internal: [u8; 152], // magic number obtained with size_of::<Option<EntryValueUninitUnion>>()
 }
 
 #[repr(C)]
