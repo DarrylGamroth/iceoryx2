@@ -10,7 +10,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use iceoryx2_log::fatal_panic;
 use pyo3::prelude::*;
 
 use crate::{
@@ -136,8 +135,9 @@ fn static_config_messaging_pattern_to_python(
         iceoryx2::service::static_config::messaging_pattern::MessagingPattern::Blackboard(_) => {
             MessagingPattern::Blackboard
         }
-        _ => {
-            fatal_panic!(from "ServiceDetails::messaging_pattern()", "Unknown messaging pattern in translation." )
+        iceoryx2::service::static_config::messaging_pattern::MessagingPattern::Log(_) => {
+            MessagingPattern::Log
         }
+        _ => unreachable!(),
     }
 }

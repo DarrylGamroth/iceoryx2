@@ -41,6 +41,10 @@ enum class MessagingPattern : uint8_t {
     /// writes arbitrary data to a key-value store which can be read by many
     /// [`Reader`]s.
     Blackboard,
+
+    /// Unidirectional append-only communication pattern where
+    /// [`Appender`]s append arbitrary data and [`Tailer`]s consume it.
+    Log,
 };
 } // namespace iox2
 

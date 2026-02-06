@@ -247,6 +247,8 @@ constexpr auto from<iox2::MessagingPattern, iox2_messaging_pattern_e>(const iox2
         return iox2_messaging_pattern_e_REQUEST_RESPONSE;
     case iox2::MessagingPattern::Blackboard:
         return iox2_messaging_pattern_e_BLACKBOARD;
+    case iox2::MessagingPattern::Log:
+        return iox2_messaging_pattern_e_LOG;
     }
 
     IOX2_UNREACHABLE();
@@ -1886,6 +1888,8 @@ constexpr auto from<int, iox2::MessagingPattern>(const int value) noexcept -> io
         return iox2::MessagingPattern::RequestResponse;
     case iox2_messaging_pattern_e_BLACKBOARD:
         return iox2::MessagingPattern::Blackboard;
+    case iox2_messaging_pattern_e_LOG:
+        return iox2::MessagingPattern::Log;
     }
 
     IOX2_UNREACHABLE();

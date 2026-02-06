@@ -19,6 +19,7 @@ pub enum MessagingPattern {
     Event,
     RequestResponse,
     Blackboard,
+    Log,
 }
 
 #[pymethods]
@@ -39,6 +40,7 @@ impl From<iceoryx2::prelude::MessagingPattern> for MessagingPattern {
                 MessagingPattern::PublishSubscribe
             }
             iceoryx2::prelude::MessagingPattern::Blackboard => MessagingPattern::Blackboard,
+            iceoryx2::prelude::MessagingPattern::Log => MessagingPattern::Log,
         }
     }
 }
@@ -54,6 +56,7 @@ impl From<MessagingPattern> for iceoryx2::prelude::MessagingPattern {
                 iceoryx2::prelude::MessagingPattern::PublishSubscribe
             }
             MessagingPattern::Blackboard => iceoryx2::prelude::MessagingPattern::Blackboard,
+            MessagingPattern::Log => iceoryx2::prelude::MessagingPattern::Log,
         }
     }
 }

@@ -94,6 +94,12 @@ impl From<&StaticConfig> for iox2_static_config_t {
                     MessagingPattern::Blackboard(blackboard) => iox2_static_config_details_t {
                         blackboard: blackboard.into(),
                     },
+                    MessagingPattern::Log(log) => iox2_static_config_details_t {
+                        publish_subscribe: unsafe {
+                            (&*(log as *const _ as *const iceoryx2::service::static_config::publish_subscribe::StaticConfig))
+                                .into()
+                        },
+                    },
                     _ => {
                         fatal_panic!(from "StaticConfig", "missing implementation for messaging pattern.")
                     }

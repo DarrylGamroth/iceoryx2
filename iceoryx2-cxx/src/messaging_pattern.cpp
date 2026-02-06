@@ -26,6 +26,9 @@ auto operator<<(std::ostream& stream, const iox2::MessagingPattern& value) -> st
     case iox2::MessagingPattern::Blackboard:
         stream << "iox2::MessagingPattern::Blackboard";
         break;
+    case iox2::MessagingPattern::Log:
+        stream << "iox2::MessagingPattern::Log";
+        break;
     }
     return stream;
 }
