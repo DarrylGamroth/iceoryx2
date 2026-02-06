@@ -237,6 +237,60 @@ fn dynamic_payload_pipeline_with_user_header_flow_works() {
 }
 
 #[test]
+fn dynamic_payload_pipeline_with_user_header_and_attributes_work() {
+    let _watchdog = Watchdog::new();
+    type ServiceType = ipc::Service;
+
+    let service_name = generate_service_name();
+    let config = generate_isolated_config();
+    let node = NodeBuilder::new()
+        .config(&config)
+        .create::<ServiceType>()
+        .unwrap();
+
+    let key = "pipeline";
+    let value = "dynamic-user-header";
+    let verifier = AttributeVerifier::new()
+        .require(&key.try_into().unwrap(), &value.try_into().unwrap())
+        .unwrap();
+
+    let created = node
+        .service_builder(&service_name)
+        .pipeline::<[u8]>()
+        .user_header::<PipelineUserHeader>()
+        .number_of_stages(1)
+        .max_in_flight_samples(8)
+        .initial_max_slice_len(16)
+        .open_or_create_with_attributes(&verifier)
+        .unwrap();
+
+    let opened = node
+        .service_builder(&service_name)
+        .pipeline::<[u8]>()
+        .user_header::<PipelineUserHeader>()
+        .open_with_attributes(&verifier)
+        .unwrap();
+
+    let mut created_values = vec![];
+    created
+        .attributes()
+        .iter_key_values(&key.try_into().unwrap(), |v| {
+            created_values.push(v.to_string());
+            CallbackProgression::Continue
+        });
+    assert_that!(created_values, contains String::from(value));
+
+    let mut opened_values = vec![];
+    opened
+        .attributes()
+        .iter_key_values(&key.try_into().unwrap(), |v| {
+            opened_values.push(v.to_string());
+            CallbackProgression::Continue
+        });
+    assert_that!(opened_values, contains String::from(value));
+}
+
+#[test]
 fn creating_worker_with_invalid_stage_fails() {
     let _watchdog = Watchdog::new();
     type ServiceType = ipc::Service;
