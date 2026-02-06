@@ -45,6 +45,12 @@
 //! [`Writer`](crate::port::writer::Writer) and read by many
 //! [`Reader`](crate::port::reader::Reader)s. Updates and reads are made on a key basis, not
 //! on the entire shared memory.
+//!
+//! ### Log
+//!
+//! Realizes an append-only in-memory message stream with
+//! [`Appender`](crate::port::appender::Appender) and
+//! [`Tailer`](crate::port::tailer::Tailer) endpoints.
 
 use serde::{Deserialize, Serialize};
 
@@ -72,4 +78,9 @@ pub enum MessagingPattern {
     /// writes arbitrary data to a key-value store which can be read by many
     /// [`Reader`](crate::port::reader::Reader)s.
     Blackboard,
+
+    /// Unidirectional append-only communication pattern where
+    /// [`Appender`](crate::port::appender::Appender)s append arbitrary data and
+    /// [`Tailer`](crate::port::tailer::Tailer)s consume it.
+    Log,
 }

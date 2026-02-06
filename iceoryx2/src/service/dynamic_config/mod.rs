@@ -21,6 +21,11 @@ pub mod event;
 pub mod publish_subscribe;
 
 /// The dynamic service configuration of an
+/// [`MessagingPattern::Log`](crate::service::messaging_pattern::MessagingPattern::Log)
+/// based service.
+pub mod log;
+
+/// The dynamic service configuration of an
 /// [`MessagingPattern::RequestResponse`](crate::service::messaging_pattern::MessagingPattern::RequestResponse)
 /// based service.
 pub mod request_response;
@@ -68,6 +73,7 @@ pub(crate) enum RemoveDeadNodeResult {
 pub(crate) enum MessagingPatternSettings {
     RequestResponse(request_response::DynamicConfigSettings),
     PublishSubscribe(publish_subscribe::DynamicConfigSettings),
+    Log(log::DynamicConfigSettings),
     Event(event::DynamicConfigSettings),
     Blackboard(blackboard::DynamicConfigSettings),
 }
@@ -76,6 +82,7 @@ pub(crate) enum MessagingPatternSettings {
 pub(crate) enum MessagingPattern {
     RequestResponse(request_response::DynamicConfig),
     PublishSubscribe(publish_subscribe::DynamicConfig),
+    Log(log::DynamicConfig),
     Event(event::DynamicConfig),
     Blackboard(blackboard::DynamicConfig),
 }
@@ -89,6 +96,7 @@ impl MessagingPattern {
             MessagingPatternSettings::PublishSubscribe(v) => {
                 MessagingPattern::PublishSubscribe(publish_subscribe::DynamicConfig::new(v))
             }
+            MessagingPatternSettings::Log(v) => MessagingPattern::Log(log::DynamicConfig::new(v)),
             MessagingPatternSettings::Event(v) => {
                 MessagingPattern::Event(event::DynamicConfig::new(v))
             }
@@ -136,6 +144,7 @@ impl DynamicConfig {
             "This should never happen! Unable to initialize NodeId container.");
         match &mut self.messaging_pattern {
             MessagingPattern::PublishSubscribe(ref mut v) => v.init(allocator),
+            MessagingPattern::Log(ref mut v) => v.init(allocator),
             MessagingPattern::Event(ref mut v) => v.init(allocator),
             MessagingPattern::RequestResponse(ref mut v) => v.init(allocator),
             MessagingPattern::Blackboard(ref mut v) => v.init(allocator),
@@ -153,6 +162,7 @@ impl DynamicConfig {
             MessagingPattern::PublishSubscribe(ref v) => {
                 v.remove_dead_node_id(node_id, port_cleanup_callback)
             }
+            MessagingPattern::Log(ref v) => v.remove_dead_node_id(node_id, port_cleanup_callback),
             MessagingPattern::Event(ref v) => v.remove_dead_node_id(node_id, port_cleanup_callback),
             MessagingPattern::RequestResponse(ref v) => {
                 v.remove_dead_node_id(node_id, port_cleanup_callback)
@@ -226,8 +236,18 @@ impl DynamicConfig {
     pub(crate) fn publish_subscribe(&self) -> &publish_subscribe::DynamicConfig {
         match &self.messaging_pattern {
             MessagingPattern::PublishSubscribe(ref v) => v,
+            MessagingPattern::Log(ref v) => &v.inner,
             m => {
                 fatal_panic!(from self, "This should never happen! Trying to access publish_subscribe::DynamicConfig when the messaging pattern is actually {:?}.", m);
+            }
+        }
+    }
+
+    pub(crate) fn log(&self) -> &log::DynamicConfig {
+        match &self.messaging_pattern {
+            MessagingPattern::Log(ref v) => v,
+            m => {
+                fatal_panic!(from self, "This should never happen! Trying to access log::DynamicConfig when the messaging pattern is actually {:?}.", m);
             }
         }
     }

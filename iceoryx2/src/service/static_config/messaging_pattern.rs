@@ -15,6 +15,7 @@ use core::fmt::Display;
 
 use crate::service::static_config::blackboard;
 use crate::service::static_config::event;
+use crate::service::static_config::log;
 use crate::service::static_config::publish_subscribe;
 use iceoryx2_bb_derive_macros::ZeroCopySend;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
@@ -49,6 +50,10 @@ pub enum MessagingPattern {
     /// Stores the static config of the
     /// [`service::MessagingPattern::Blackboard`](crate::service::messaging_pattern::MessagingPattern::Blackboard)
     Blackboard(blackboard::StaticConfig),
+
+    /// Stores the static config of the
+    /// [`service::MessagingPattern::Log`](crate::service::messaging_pattern::MessagingPattern::Log)
+    Log(log::StaticConfig),
 }
 
 impl Display for MessagingPattern {
@@ -58,6 +63,7 @@ impl Display for MessagingPattern {
             MessagingPattern::Event(_) => write!(f, "Event"),
             MessagingPattern::PublishSubscribe(_) => write!(f, "PublishSubscribe"),
             MessagingPattern::Blackboard(_) => write!(f, "Blackboard"),
+            MessagingPattern::Log(_) => write!(f, "Log"),
         }
     }
 }
@@ -72,11 +78,16 @@ impl MessagingPattern {
     ///
     ///  * User must ensure that publish subscribe is stored inside
     pub unsafe fn publish_subscribe(&self) -> &publish_subscribe::StaticConfig {
-        if let MessagingPattern::PublishSubscribe(v) = self {
-            v
-        } else {
-            fatal_panic!(from self,
-                "This should never happen! Trying to access publish subscribe messaging pattern that is not stored.");
+        match self {
+            MessagingPattern::PublishSubscribe(v) => v,
+            MessagingPattern::Log(v) => {
+                // Safe since log::StaticConfig mirrors publish_subscribe::StaticConfig layout.
+                &*(v as *const log::StaticConfig as *const publish_subscribe::StaticConfig)
+            }
+            _ => {
+                fatal_panic!(from self,
+                    "This should never happen! Trying to access publish subscribe messaging pattern that is not stored.");
+            }
         }
     }
 
@@ -100,6 +111,7 @@ mod tests {
     use super::*;
     use crate::service::config;
     use crate::service::static_config::event;
+    use crate::service::static_config::log;
     use crate::service::static_config::publish_subscribe;
 
     #[test]
@@ -124,6 +136,11 @@ mod tests {
         let b2 = MessagingPattern::Blackboard(blackboard::StaticConfig::new(&cfg));
         assert_that!(b1.is_same_pattern(&b2), eq true);
         assert_that!(b2.is_same_pattern(&b1), eq true);
+
+        let l1 = MessagingPattern::Log(log::StaticConfig::new(&cfg));
+        let l2 = MessagingPattern::Log(log::StaticConfig::new(&cfg));
+        assert_that!(l1.is_same_pattern(&l2), eq true);
+        assert_that!(l2.is_same_pattern(&l1), eq true);
 
         let mut new_defaults = config::Defaults {
             request_response: cfg.defaults.request_response.clone(),
@@ -160,6 +177,10 @@ mod tests {
         assert_that!(b1.is_same_pattern(&b3), eq true);
         assert_that!(b2.is_same_pattern(&b3), eq true);
 
+        let l3 = MessagingPattern::Log(log::StaticConfig::new(&cfg2));
+        assert_that!(l1.is_same_pattern(&l3), eq true);
+        assert_that!(l2.is_same_pattern(&l3), eq true);
+
         assert_that!(p1.is_same_pattern(&e1), eq false);
         assert_that!(p3.is_same_pattern(&e3), eq false);
         assert_that!(p1.is_same_pattern(&r1), eq false);
@@ -172,5 +193,9 @@ mod tests {
         assert_that!(e3.is_same_pattern(&b3), eq false);
         assert_that!(r1.is_same_pattern(&b1), eq false);
         assert_that!(r3.is_same_pattern(&b3), eq false);
+        assert_that!(p1.is_same_pattern(&l1), eq false);
+        assert_that!(e1.is_same_pattern(&l1), eq false);
+        assert_that!(r1.is_same_pattern(&l1), eq false);
+        assert_that!(b1.is_same_pattern(&l1), eq false);
     }
 }

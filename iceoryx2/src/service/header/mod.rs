@@ -14,6 +14,10 @@
 /// [`MessagingPattern::PublishSubscribe`](crate::service::messaging_pattern::MessagingPattern::PublishSubscribe)
 pub mod publish_subscribe;
 
+/// Sample header used by
+/// [`MessagingPattern::Log`](crate::service::messaging_pattern::MessagingPattern::Log)
+pub mod log;
+
 /// Payload headers used by
 /// [`MessagingPattern::RequestResponse`](crate::service::messaging_pattern::MessagingPattern::RequestResponse)
 pub mod request_response;

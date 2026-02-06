@@ -18,6 +18,8 @@ use update_connections::ConnectionFailure;
 pub(crate) mod details;
 pub use details::data_segment::DataSegmentType;
 
+/// Sending endpoint (port) for log based communication
+pub mod appender;
 /// Sends requests to a [`Server`](crate::port::server::Server) and receives responses.
 pub mod client;
 /// Defines the event id used to identify the source of an event.
@@ -36,6 +38,8 @@ pub mod reader;
 pub mod server;
 /// Receiving endpoint (port) for publish-subscribe based communication
 pub mod subscriber;
+/// Receiving endpoint (port) for log based communication
+pub mod tailer;
 /// Interface to perform cyclic updates to the ports. Required to deliver history to new
 /// participants or to perform other management tasks.
 pub mod update_connections;

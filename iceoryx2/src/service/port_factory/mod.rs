@@ -51,11 +51,22 @@ pub mod notifier;
 /// communication and to acquire static and dynamic service information
 pub mod publish_subscribe;
 
+/// Factory to create the endpoints of
+/// [`MessagingPattern::Log`](crate::service::messaging_pattern::MessagingPattern::Log) based
+/// communication and to acquire static and dynamic service information
+pub mod log;
+
 /// Factory to create a [`Publisher`](crate::port::publisher::Publisher)
 pub mod publisher;
 
 /// Factory to create a [`Subscriber`](crate::port::subscriber::Subscriber)
 pub mod subscriber;
+
+/// Factory to create a [`Appender`](crate::port::appender::Appender)
+pub mod appender;
+
+/// Factory to create a [`Tailer`](crate::port::tailer::Tailer)
+pub mod tailer;
 
 /// The trait that contains the interface of all port factories for any kind of
 /// [`crate::service::messaging_pattern::MessagingPattern`].

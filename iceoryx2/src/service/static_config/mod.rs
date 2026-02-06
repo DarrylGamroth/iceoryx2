@@ -20,6 +20,11 @@ pub mod event;
 /// based service.
 pub mod publish_subscribe;
 
+/// The static service configuration of an
+/// [`MessagingPattern::Log`]
+/// based service.
+pub mod log;
+
 /// Contains the size, alignment and name of the header and payload type
 /// and the type variant
 pub mod message_type_details;
@@ -99,6 +104,22 @@ impl StaticConfig {
             service_id: ServiceId::new::<Hasher>(
                 service_name,
                 crate::service::messaging_pattern::MessagingPattern::PublishSubscribe,
+            ),
+            service_name: *service_name,
+            messaging_pattern,
+            attributes: AttributeSet::new(),
+        }
+    }
+
+    pub(crate) fn new_log<Hasher: Hash>(
+        service_name: &ServiceName,
+        config: &config::Config,
+    ) -> Self {
+        let messaging_pattern = MessagingPattern::Log(log::StaticConfig::new(config));
+        Self {
+            service_id: ServiceId::new::<Hasher>(
+                service_name,
+                crate::service::messaging_pattern::MessagingPattern::Log,
             ),
             service_name: *service_name,
             messaging_pattern,
@@ -191,6 +212,12 @@ impl StaticConfig {
     pub fn publish_subscribe(&self) -> &publish_subscribe::StaticConfig {
         match &self.messaging_pattern {
             MessagingPattern::PublishSubscribe(ref v) => v,
+            MessagingPattern::Log(ref v) => {
+                // Safe since log::StaticConfig mirrors publish_subscribe::StaticConfig layout.
+                unsafe {
+                    &*(v as *const log::StaticConfig as *const publish_subscribe::StaticConfig)
+                }
+            }
             m => {
                 fatal_panic!(from self, "This should never happen! Trying to access publish_subscribe::StaticConfig when the messaging pattern is actually {:?}!", m)
             }
@@ -201,8 +228,34 @@ impl StaticConfig {
         let origin = format!("{self:?}");
         match &mut self.messaging_pattern {
             MessagingPattern::PublishSubscribe(ref mut v) => v,
+            MessagingPattern::Log(ref mut v) => {
+                // Safe since log::StaticConfig mirrors publish_subscribe::StaticConfig layout.
+                unsafe {
+                    &mut *(v as *mut log::StaticConfig as *mut publish_subscribe::StaticConfig)
+                }
+            }
             m => {
                 fatal_panic!(from origin, "This should never happen! Trying to access publish_subscribe::StaticConfig when the messaging pattern is actually {:?}!", m)
+            }
+        }
+    }
+
+    /// Unwrap the Log static configuration.
+    pub fn log(&self) -> &log::StaticConfig {
+        match &self.messaging_pattern {
+            MessagingPattern::Log(ref v) => v,
+            m => {
+                fatal_panic!(from self, "This should never happen! Trying to access log::StaticConfig when the messaging pattern is actually {:?}!", m)
+            }
+        }
+    }
+
+    pub(crate) fn log_mut(&mut self) -> &mut log::StaticConfig {
+        let origin = format!("{self:?}");
+        match &mut self.messaging_pattern {
+            MessagingPattern::Log(ref mut v) => v,
+            m => {
+                fatal_panic!(from origin, "This should never happen! Trying to access log::StaticConfig when the messaging pattern is actually {:?}!", m)
             }
         }
     }

@@ -20,6 +20,9 @@ pub mod event;
 /// Builder for [`MessagingPattern::PublishSubscribe`](crate::service::messaging_pattern::MessagingPattern::PublishSubscribe)
 pub mod publish_subscribe;
 
+/// Builder for [`MessagingPattern::Log`](crate::service::messaging_pattern::MessagingPattern::Log)
+pub mod log;
+
 /// Builder for [`MessagingPattern::RequestResponse`](crate::service::messaging_pattern::MessagingPattern::RequestResponse)
 pub mod request_response;
 
@@ -177,6 +180,18 @@ impl<S: Service> Builder<S> {
     }
 
     /// Create a new builder to create a
+    /// [`MessagingPattern::Log`](crate::service::messaging_pattern::MessagingPattern::Log) [`Service`].
+    pub fn log<PayloadType: Debug + ?Sized + ZeroCopySend>(
+        self,
+    ) -> log::Builder<PayloadType, (), S> {
+        BuilderWithServiceType::new(
+            StaticConfig::new_log::<S::ServiceNameHasher>(&self.name, self.shared_node.config()),
+            self.shared_node,
+        )
+        .log()
+    }
+
+    /// Create a new builder to create a
     /// [`MessagingPattern::Event`](crate::service::messaging_pattern::MessagingPattern::Event) [`Service`].
     pub fn event(self) -> event::Builder<S> {
         BuilderWithServiceType::new(
@@ -251,6 +266,12 @@ impl<ServiceType: service::Service> BuilderWithServiceType<ServiceType> {
         self,
     ) -> publish_subscribe::Builder<PayloadType, (), ServiceType> {
         publish_subscribe::Builder::new(self)
+    }
+
+    fn log<PayloadType: Debug + ?Sized + ZeroCopySend>(
+        self,
+    ) -> log::Builder<PayloadType, (), ServiceType> {
+        log::Builder::new(self)
     }
 
     fn event(self) -> event::Builder<ServiceType> {
