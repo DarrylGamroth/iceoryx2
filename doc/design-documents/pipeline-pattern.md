@@ -1,9 +1,9 @@
 # Pipeline Messaging Pattern (Plan)
 
 ## Status
-- Completed (Rust MVP)
+- Completed (Rust + first-class service-level FFI)
 - Branch: `feature/pipeline-pattern-design`
-- Last updated: 2026-02-05
+- Last updated: 2026-02-06
 
 ## Summary
 Add an idiomatic Rust `Pipeline` API for staged, ordered, lock-free handoff through a fixed sequence of processing stages.
@@ -22,7 +22,7 @@ The first version composes a pipeline from internal publish-subscribe edge servi
 - Heterogeneous payload types per stage in v1.
 - Cross-service transaction semantics.
 - Best-effort reordering across stages.
-- C/C++/Python bindings in this branch (tracked as follow-up).
+- Stage-role runtime endpoint parity (`ingress`/`worker`/`egress`) in C/C++/Python in this branch.
 
 ## Terminology
 - `Stage`: A numbered processing step in the pipeline (`0..N-1`).
@@ -256,7 +256,8 @@ The following areas must receive `Pipeline` wiring equivalent to existing patter
 
 ## Follow-Up Phases
 - [ ] Add first-class static/dynamic config messaging-pattern integration if pipeline becomes a standalone service kind.
-- [ ] Extend C/C++/Python bindings with equivalent pipeline APIs.
+- [x] Extend C/C++/Python bindings with equivalent pipeline service-level APIs (builder lifecycle, config, metrics, errors).
+- [ ] Extend C/C++/Python bindings with runtime stage-role endpoint APIs (`ingress`/`worker`/`egress`) when required.
 - [ ] Add cross-language and matrix conformance suites for pipeline.
 
 ## Validation Plan
@@ -264,7 +265,7 @@ The following areas must receive `Pipeline` wiring equivalent to existing patter
 - `cargo test -p iceoryx2 --test service_pipeline_tests`
 - targeted unit tests for queue/state invariants and ownership transitions
 - Examples:
-- `cargo check -p example --example pipeline`
+- `cargo check -p example --example pipeline_ingress --example pipeline_worker --example pipeline_egress`
 
 Follow-up validation once bindings are added:
 - C++:
@@ -285,4 +286,7 @@ Follow-up validation once bindings are added:
 - 2026-02-05: Dynamic payload decision recorded: pub/sub-style bounded dynamic slice payloads are supported at ingress.
 - 2026-02-05: Implemented Rust pipeline builder and port factory modules and wired them into `service::builder` and `service::port_factory`.
 - 2026-02-05: Added integration tests in `iceoryx2/tests/service_pipeline_tests.rs` (fixed payload flow, dynamic payload flow, worker stage bounds, open/create lifecycle).
-- 2026-02-05: Added a Rust pipeline example at `examples/rust/pipeline/pipeline.rs` and updated docs where pipeline was previously marked as planned.
+- 2026-02-05: Added Rust pipeline examples at `examples/rust/pipeline/ingress.rs`, `examples/rust/pipeline/worker.rs`, and `examples/rust/pipeline/egress.rs` and updated docs where pipeline was previously marked as planned.
+- 2026-02-06: Added C FFI pipeline service-level APIs and tests (`service_builder_pipeline` + `port_factory_pipeline` + static config wiring).
+- 2026-02-06: Added Python pipeline service-level bindings and tests (`ServiceBuilder.pipeline(...)`, `PortFactoryPipeline`, static config + messaging pattern/error wiring).
+- 2026-02-06: Added C++ first-class pipeline API surface (`ServiceBuilder::pipeline`, `PortFactoryPipeline`, `StaticConfigPipeline`, `Pipeline*Error` enums), enum translation wiring, and dedicated pipeline tests.

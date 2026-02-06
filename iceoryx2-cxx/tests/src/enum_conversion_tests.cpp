@@ -20,6 +20,7 @@
 #include "iox2/notifier_error.hpp"
 #include "iox2/publisher_error.hpp"
 #include "iox2/service_builder_event_error.hpp"
+#include "iox2/service_builder_pipeline_error.hpp"
 #include "iox2/service_builder_publish_subscribe_error.hpp"
 #include "iox2/service_error_enums.hpp"
 #include "iox2/subscriber_error.hpp"
@@ -220,6 +221,67 @@ TEST(EnumConversionTest, publish_subscribe_open_or_create_into_c_str) {
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateIsBeingCreatedByAnotherInstance)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateOldConnectionsStillActive)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateHangsInCreation)), 1U);
+}
+
+TEST(EnumConversionTest, pipeline_open_into_c_str) {
+    using Sut = iox2::PipelineOpenError;
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::DoesNotExist)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::InsufficientPermissions)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::ServiceInCorruptedState)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::IncompatibleMessagingPattern)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::IncompatibleAttributes)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::IncompatiblePayloadType)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::HangsInCreation)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::DoesNotSupportRequestedAmountOfNodes)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::DoesNotSupportRequestedAmountOfStages)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::DoesNotSupportRequestedInFlightSamples)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::DoesNotSupportRequestedInitialMaxSliceLen)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::ExceedsMaxNumberOfNodes)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::IsMarkedForDestruction)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::InvalidConfiguration)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::EdgeFailure)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::InternalFailure)), 1U);
+}
+
+TEST(EnumConversionTest, pipeline_create_into_c_str) {
+    using Sut = iox2::PipelineCreateError;
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::ServiceInCorruptedState)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::InternalFailure)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::IsBeingCreatedByAnotherInstance)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::AlreadyExists)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::HangsInCreation)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::InsufficientPermissions)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::InvalidConfiguration)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::EdgeFailure)), 1U);
+}
+
+TEST(EnumConversionTest, pipeline_open_or_create_into_c_str) {
+    using Sut = iox2::PipelineOpenOrCreateError;
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenDoesNotExist)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenInsufficientPermissions)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenServiceInCorruptedState)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenIncompatibleMessagingPattern)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenIncompatibleAttributes)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenIncompatiblePayloadType)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenHangsInCreation)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenDoesNotSupportRequestedAmountOfNodes)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenDoesNotSupportRequestedAmountOfStages)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenDoesNotSupportRequestedInFlightSamples)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenDoesNotSupportRequestedInitialMaxSliceLen)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenExceedsMaxNumberOfNodes)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenIsMarkedForDestruction)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenInvalidConfiguration)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenEdgeFailure)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenInternalFailure)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateServiceInCorruptedState)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateInternalFailure)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateIsBeingCreatedByAnotherInstance)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateAlreadyExists)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateHangsInCreation)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateInsufficientPermissions)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateInvalidConfiguration)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::CreateEdgeFailure)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::SystemInFlux)), 1U);
 }
 
 TEST(EnumConversionTest, service_details_into_c_str) {

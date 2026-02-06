@@ -14,53 +14,94 @@
 
 extern crate alloc;
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
 use iceoryx2_bb_elementary::CallbackProgression;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
+use iceoryx2_cal::dynamic_storage::DynamicStorage;
 
+use crate::node::NodeListFailure;
 use crate::port::publisher::{Publisher, PublisherCreateError};
 use crate::port::subscriber::{Subscriber, SubscriberCreateError};
 use crate::port::unable_to_deliver_strategy::UnableToDeliverStrategy;
 use crate::port::{LoanError, ReceiveError, SendError};
 use crate::prelude::AllocationStrategy;
 use crate::sample_mut::SampleMut;
+use crate::service::attribute::AttributeSet;
 use crate::service::dynamic_config::publish_subscribe::{PublisherDetails, SubscriberDetails};
 use crate::service::port_factory::publish_subscribe;
-use crate::service::port_factory::PortFactory as _;
+use crate::service::port_factory::{nodes, PortFactory as _};
+use crate::service::service_id::ServiceId;
 use crate::service::service_name::ServiceName;
+use crate::service::{dynamic_config, static_config, NoResource, ServiceState};
 use crate::service::Service;
 
 #[derive(Debug)]
 /// Pipeline factory built from a fixed chain of internal publish-subscribe edges.
 pub struct PortFactory<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> {
-    name: ServiceName,
+    pub(crate) service: Arc<ServiceState<ServiceType, NoResource>>,
     number_of_stages: usize,
     initial_max_slice_len: usize,
     edges: Vec<publish_subscribe::PortFactory<ServiceType, Payload, ()>>,
 }
 
 impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
+    crate::service::port_factory::PortFactory for PortFactory<ServiceType, Payload>
+{
+    type Service = ServiceType;
+    type StaticConfig = static_config::pipeline::StaticConfig;
+    type DynamicConfig = dynamic_config::pipeline::DynamicConfig;
+
+    fn name(&self) -> &ServiceName {
+        self.service.static_config.name()
+    }
+
+    fn service_id(&self) -> &ServiceId {
+        self.service.static_config.service_id()
+    }
+
+    fn attributes(&self) -> &AttributeSet {
+        self.service.static_config.attributes()
+    }
+
+    fn static_config(&self) -> &static_config::pipeline::StaticConfig {
+        self.service.static_config.pipeline()
+    }
+
+    fn dynamic_config(&self) -> &dynamic_config::pipeline::DynamicConfig {
+        self.service.dynamic_storage.get().pipeline()
+    }
+
+    fn nodes<F: FnMut(crate::node::NodeState<ServiceType>) -> CallbackProgression>(
+        &self,
+        callback: F,
+    ) -> Result<(), NodeListFailure> {
+        nodes(
+            self.service.dynamic_storage.get(),
+            self.service.shared_node.config(),
+            callback,
+        )
+    }
+}
+
+impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
     PortFactory<ServiceType, Payload>
 {
     pub(crate) fn new(
-        name: ServiceName,
-        number_of_stages: usize,
-        initial_max_slice_len: usize,
+        service: ServiceState<ServiceType, NoResource>,
         edges: Vec<publish_subscribe::PortFactory<ServiceType, Payload, ()>>,
     ) -> Self {
+        let number_of_stages = service.static_config.pipeline().number_of_stages();
+        let initial_max_slice_len = service.static_config.pipeline().initial_max_slice_len();
+
         Self {
-            name,
+            service: Arc::new(service),
             number_of_stages,
             initial_max_slice_len,
             edges,
         }
-    }
-
-    /// Returns the base pipeline service name.
-    pub fn name(&self) -> &ServiceName {
-        &self.name
     }
 
     /// Returns the number of worker stages.
@@ -93,6 +134,7 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
         if stage_id >= self.number_of_stages {
             return None;
         }
+
         Some(
             self.edges[stage_id]
                 .dynamic_config()
@@ -248,6 +290,7 @@ pub struct Worker<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized +
 
 #[derive(Debug)]
 /// Mutable work item created from a worker receive operation.
+#[must_use = "Work must be sent or explicitly discarded."]
 pub struct WorkMut<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> {
     sample: SampleMut<ServiceType, Payload, ()>,
 }
@@ -264,6 +307,9 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
     pub fn send(self) -> Result<usize, SendError> {
         self.sample.send()
     }
+
+    /// Explicitly discards the current work item and returns the sample to the pool.
+    pub fn discard(self) {}
 }
 
 #[derive(Debug)]

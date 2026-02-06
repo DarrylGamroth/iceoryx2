@@ -15,6 +15,7 @@ use core::fmt::Display;
 
 use crate::service::static_config::blackboard;
 use crate::service::static_config::event;
+use crate::service::static_config::pipeline;
 use crate::service::static_config::publish_subscribe;
 use iceoryx2_bb_derive_macros::ZeroCopySend;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
@@ -49,6 +50,10 @@ pub enum MessagingPattern {
     /// Stores the static config of the
     /// [`service::MessagingPattern::Blackboard`](crate::service::messaging_pattern::MessagingPattern::Blackboard)
     Blackboard(blackboard::StaticConfig),
+
+    /// Stores the static config of the
+    /// [`service::MessagingPattern::Pipeline`](crate::service::messaging_pattern::MessagingPattern::Pipeline)
+    Pipeline(pipeline::StaticConfig),
 }
 
 impl Display for MessagingPattern {
@@ -58,6 +63,7 @@ impl Display for MessagingPattern {
             MessagingPattern::Event(_) => write!(f, "Event"),
             MessagingPattern::PublishSubscribe(_) => write!(f, "PublishSubscribe"),
             MessagingPattern::Blackboard(_) => write!(f, "Blackboard"),
+            MessagingPattern::Pipeline(_) => write!(f, "Pipeline"),
         }
     }
 }
@@ -91,6 +97,18 @@ impl MessagingPattern {
                 "This should never happen! Trying to access request response messaging pattern that is not stored.");
         }
     }
+
+    /// # Safety
+    ///
+    ///  * User must ensure that pipeline is stored inside
+    pub unsafe fn pipeline(&self) -> &pipeline::StaticConfig {
+        if let MessagingPattern::Pipeline(v) = self {
+            v
+        } else {
+            fatal_panic!(from self,
+                "This should never happen! Trying to access pipeline messaging pattern that is not stored.");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -100,6 +118,7 @@ mod tests {
     use super::*;
     use crate::service::config;
     use crate::service::static_config::event;
+    use crate::service::static_config::pipeline;
     use crate::service::static_config::publish_subscribe;
 
     #[test]
@@ -124,6 +143,11 @@ mod tests {
         let b2 = MessagingPattern::Blackboard(blackboard::StaticConfig::new(&cfg));
         assert_that!(b1.is_same_pattern(&b2), eq true);
         assert_that!(b2.is_same_pattern(&b1), eq true);
+
+        let pi1 = MessagingPattern::Pipeline(pipeline::StaticConfig::new(&cfg));
+        let pi2 = MessagingPattern::Pipeline(pipeline::StaticConfig::new(&cfg));
+        assert_that!(pi1.is_same_pattern(&pi2), eq true);
+        assert_that!(pi2.is_same_pattern(&pi1), eq true);
 
         let mut new_defaults = config::Defaults {
             request_response: cfg.defaults.request_response.clone(),
@@ -160,6 +184,10 @@ mod tests {
         assert_that!(b1.is_same_pattern(&b3), eq true);
         assert_that!(b2.is_same_pattern(&b3), eq true);
 
+        let pi3 = MessagingPattern::Pipeline(pipeline::StaticConfig::new(&cfg2));
+        assert_that!(pi1.is_same_pattern(&pi3), eq true);
+        assert_that!(pi2.is_same_pattern(&pi3), eq true);
+
         assert_that!(p1.is_same_pattern(&e1), eq false);
         assert_that!(p3.is_same_pattern(&e3), eq false);
         assert_that!(p1.is_same_pattern(&r1), eq false);
@@ -172,5 +200,9 @@ mod tests {
         assert_that!(e3.is_same_pattern(&b3), eq false);
         assert_that!(r1.is_same_pattern(&b1), eq false);
         assert_that!(r3.is_same_pattern(&b3), eq false);
+        assert_that!(p1.is_same_pattern(&pi1), eq false);
+        assert_that!(e1.is_same_pattern(&pi1), eq false);
+        assert_that!(r1.is_same_pattern(&pi1), eq false);
+        assert_that!(b1.is_same_pattern(&pi1), eq false);
     }
 }

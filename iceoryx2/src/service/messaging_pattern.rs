@@ -45,6 +45,11 @@
 //! [`Writer`](crate::port::writer::Writer) and read by many
 //! [`Reader`](crate::port::reader::Reader)s. Updates and reads are made on a key basis, not
 //! on the entire shared memory.
+//!
+//! ### Pipeline
+//!
+//! Realizes staged, unidirectional handoff through a fixed amount of worker stages where data
+//! is received, optionally mutated, and forwarded.
 
 use serde::{Deserialize, Serialize};
 
@@ -72,4 +77,8 @@ pub enum MessagingPattern {
     /// writes arbitrary data to a key-value store which can be read by many
     /// [`Reader`](crate::port::reader::Reader)s.
     Blackboard,
+
+    /// Unidirectional communication pattern where data is forwarded through a fixed sequence of
+    /// worker stages.
+    Pipeline,
 }

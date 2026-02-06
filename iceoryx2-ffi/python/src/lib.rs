@@ -51,6 +51,7 @@ pub mod port_factory_client;
 pub mod port_factory_event;
 pub mod port_factory_listener;
 pub mod port_factory_notifier;
+pub mod port_factory_pipeline;
 pub mod port_factory_publish_subscribe;
 pub mod port_factory_publisher;
 pub mod port_factory_reader;
@@ -75,6 +76,7 @@ pub mod service;
 pub mod service_builder;
 pub mod service_builder_blackboard;
 pub mod service_builder_event;
+pub mod service_builder_pipeline;
 pub mod service_builder_publish_subscribe;
 pub mod service_builder_request_response;
 pub mod service_details;
@@ -84,6 +86,7 @@ pub mod service_type;
 pub mod signal_handling_mode;
 pub mod static_config_blackboard;
 pub mod static_config_event;
+pub mod static_config_pipeline;
 pub mod static_config_publish_subscribe;
 pub mod static_config_request_response;
 pub mod subscriber;
@@ -163,6 +166,7 @@ fn _iceoryx2(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::port_factory_event::PortFactoryEvent>()?;
     m.add_class::<crate::port_factory_listener::PortFactoryListener>()?;
     m.add_class::<crate::port_factory_notifier::PortFactoryNotifier>()?;
+    m.add_class::<crate::port_factory_pipeline::PortFactoryPipeline>()?;
     m.add_class::<crate::port_factory_publisher::PortFactoryPublisher>()?;
     m.add_class::<crate::port_factory_publish_subscribe::PortFactoryPublishSubscribe>()?;
     m.add_class::<crate::port_factory_reader::PortFactoryReader>()?;
@@ -188,6 +192,7 @@ fn _iceoryx2(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::service_builder_blackboard::ServiceBuilderBlackboardCreator>()?;
     m.add_class::<crate::service_builder_blackboard::ServiceBuilderBlackboardOpener>()?;
     m.add_class::<crate::service_builder_event::ServiceBuilderEvent>()?;
+    m.add_class::<crate::service_builder_pipeline::ServiceBuilderPipeline>()?;
     m.add_class::<crate::service_builder_publish_subscribe::ServiceBuilderPublishSubscribe>()?;
     m.add_class::<crate::service_builder_request_response::ServiceBuilderRequestResponse>()?;
     m.add_class::<crate::service_details::ServiceDetails>()?;
@@ -197,6 +202,7 @@ fn _iceoryx2(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::signal_handling_mode::SignalHandlingMode>()?;
     m.add_class::<crate::static_config_blackboard::StaticConfigBlackboard>()?;
     m.add_class::<crate::static_config_event::StaticConfigEvent>()?;
+    m.add_class::<crate::static_config_pipeline::StaticConfigPipeline>()?;
     m.add_class::<crate::static_config_publish_subscribe::StaticConfigPublishSubscribe>()?;
     m.add_class::<crate::static_config_request_response::StaticConfigRequestResponse>()?;
     m.add_class::<crate::subscriber::Subscriber>()?;
@@ -300,6 +306,18 @@ fn _iceoryx2(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "PublishSubscribeOpenOrCreateError",
         py.get_type::<crate::error::PublishSubscribeOpenOrCreateError>(),
+    )?;
+    m.add(
+        "PipelineOpenError",
+        py.get_type::<crate::error::PipelineOpenError>(),
+    )?;
+    m.add(
+        "PipelineCreateError",
+        py.get_type::<crate::error::PipelineCreateError>(),
+    )?;
+    m.add(
+        "PipelineOpenOrCreateError",
+        py.get_type::<crate::error::PipelineOpenOrCreateError>(),
     )?;
     m.add("ReceiveError", py.get_type::<crate::error::ReceiveError>())?;
     m.add(

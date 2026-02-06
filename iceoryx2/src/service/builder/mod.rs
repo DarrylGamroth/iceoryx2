@@ -227,7 +227,11 @@ impl<S: Service> Builder<S> {
     pub fn pipeline<PayloadType: Debug + ?Sized + ZeroCopySend>(
         self,
     ) -> pipeline::Builder<PayloadType, S> {
-        pipeline::Builder::new(self.name, self.shared_node)
+        BuilderWithServiceType::new(
+            StaticConfig::new_pipeline::<S::ServiceNameHasher>(&self.name, self.shared_node.config()),
+            self.shared_node,
+        )
+        .pipeline()
     }
 }
 
@@ -281,6 +285,12 @@ impl<ServiceType: service::Service> BuilderWithServiceType<ServiceType> {
         self,
     ) -> blackboard::Opener<KeyType, ServiceType> {
         blackboard::Opener::new(self)
+    }
+
+    fn pipeline<PayloadType: Debug + ?Sized + ZeroCopySend>(
+        self,
+    ) -> pipeline::Builder<PayloadType, ServiceType> {
+        pipeline::Builder::new(self)
     }
 
     fn is_service_available(

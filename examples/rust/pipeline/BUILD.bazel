@@ -13,8 +13,28 @@
 load("@rules_rust//rust:defs.bzl", "rust_binary")
 
 rust_binary(
-    name = "pipeline",
-    srcs = ["pipeline.rs"],
+    name = "ingress",
+    srcs = ["ingress.rs"],
+    deps = [
+        "//iceoryx2:iceoryx2",
+        "//iceoryx2-log/log:iceoryx2-log",
+        "//iceoryx2-bb/loggers:iceoryx2-bb-loggers",
+    ],
+)
+
+rust_binary(
+    name = "worker",
+    srcs = ["worker.rs"],
+    deps = [
+        "//iceoryx2:iceoryx2",
+        "//iceoryx2-log/log:iceoryx2-log",
+        "//iceoryx2-bb/loggers:iceoryx2-bb-loggers",
+    ],
+)
+
+rust_binary(
+    name = "egress",
+    srcs = ["egress.rs"],
     deps = [
         "//iceoryx2:iceoryx2",
         "//iceoryx2-log/log:iceoryx2-log",

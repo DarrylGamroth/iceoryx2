@@ -165,8 +165,16 @@ path = "rust/health_monitoring/central_daemon.rs"
 # pipeline
 
 [[example]]
-name = "pipeline"
-path = "rust/pipeline/pipeline.rs"
+name = "pipeline_ingress"
+path = "rust/pipeline/ingress.rs"
+
+[[example]]
+name = "pipeline_worker"
+path = "rust/pipeline/worker.rs"
+
+[[example]]
+name = "pipeline_egress"
+path = "rust/pipeline/egress.rs"
 
 # publish_subscribe
 

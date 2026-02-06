@@ -41,6 +41,10 @@ enum class MessagingPattern : uint8_t {
     /// writes arbitrary data to a key-value store which can be read by many
     /// [`Reader`]s.
     Blackboard,
+
+    /// Unidirectional staged communication pattern where ingress publishes work
+    /// into a fixed amount of worker stages and egress consumes the final result.
+    Pipeline,
 };
 } // namespace iox2
 

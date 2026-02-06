@@ -17,6 +17,7 @@ mod node_name_tests;
 mod node_tests;
 mod notifier_tests;
 mod service_builder_event_tests;
+mod service_builder_pipeline_tests;
 mod service_builder_pub_sub_tests;
 mod service_name_tests;
 

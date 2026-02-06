@@ -30,6 +30,11 @@ pub mod request_response;
 /// based service.
 pub mod blackboard;
 
+/// The dynamic service configuration of an
+/// [`MessagingPattern::Pipeline`](crate::service::messaging_pattern::MessagingPattern::Pipeline)
+/// based service.
+pub mod pipeline;
+
 use core::fmt::Display;
 use iceoryx2_bb_container::queue::RelocatableContainer;
 use iceoryx2_bb_elementary::CallbackProgression;
@@ -70,6 +75,7 @@ pub(crate) enum MessagingPatternSettings {
     PublishSubscribe(publish_subscribe::DynamicConfigSettings),
     Event(event::DynamicConfigSettings),
     Blackboard(blackboard::DynamicConfigSettings),
+    Pipeline(pipeline::DynamicConfigSettings),
 }
 
 #[derive(Debug)]
@@ -78,6 +84,7 @@ pub(crate) enum MessagingPattern {
     PublishSubscribe(publish_subscribe::DynamicConfig),
     Event(event::DynamicConfig),
     Blackboard(blackboard::DynamicConfig),
+    Pipeline(pipeline::DynamicConfig),
 }
 
 impl MessagingPattern {
@@ -94,6 +101,9 @@ impl MessagingPattern {
             }
             MessagingPatternSettings::Blackboard(v) => {
                 MessagingPattern::Blackboard(blackboard::DynamicConfig::new(v))
+            }
+            MessagingPatternSettings::Pipeline(v) => {
+                MessagingPattern::Pipeline(pipeline::DynamicConfig::new(v))
             }
         }
     }
@@ -139,6 +149,7 @@ impl DynamicConfig {
             MessagingPattern::Event(ref mut v) => v.init(allocator),
             MessagingPattern::RequestResponse(ref mut v) => v.init(allocator),
             MessagingPattern::Blackboard(ref mut v) => v.init(allocator),
+            MessagingPattern::Pipeline(ref mut v) => v.init(allocator),
         }
     }
 
@@ -160,6 +171,7 @@ impl DynamicConfig {
             MessagingPattern::Blackboard(ref v) => {
                 v.remove_dead_node_id(node_id, port_cleanup_callback)
             }
+            MessagingPattern::Pipeline(ref v) => v.remove_dead_node_id(node_id, port_cleanup_callback),
         };
 
         let mut ret_val = Err(RemoveDeadNodeResult::NodeNotRegistered);
@@ -246,6 +258,15 @@ impl DynamicConfig {
             MessagingPattern::Blackboard(ref v) => v,
             m => {
                 fatal_panic!(from self, "This should never happen! Trying to access blackboard::DynamicConfig when the messaging pattern is actually {:?}.", m);
+            }
+        }
+    }
+
+    pub(crate) fn pipeline(&self) -> &pipeline::DynamicConfig {
+        match &self.messaging_pattern {
+            MessagingPattern::Pipeline(ref v) => v,
+            m => {
+                fatal_panic!(from self, "This should never happen! Trying to access pipeline::DynamicConfig when the messaging pattern is actually {:?}.", m);
             }
         }
     }

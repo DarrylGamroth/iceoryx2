@@ -17,7 +17,7 @@ use alloc::boxed::Box;
 
 use iceoryx2::prelude::*;
 
-const CYCLE_TIME: Duration = Duration::from_secs(1);
+const CYCLE_TIME: Duration = Duration::from_millis(100);
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
     set_log_level_from_env_or(LogLevel::Info);
@@ -27,35 +27,20 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     let pipeline = node
         .service_builder(&"Example Pipeline".try_into()?)
         .pipeline::<u64>()
-        .number_of_stages(2)
+        .number_of_stages(1)
         .max_in_flight_samples(16)
         .open_or_create()?;
 
-    let ingress = pipeline.ingress_builder().create()?;
-    let worker_0 = pipeline.worker_builder(0).create()?;
-    let worker_1 = pipeline.worker_builder(1).create()?;
-    let egress = pipeline.egress_builder().create()?;
-
-    let mut counter = 0u64;
+    let worker = pipeline.worker_builder(0).create()?;
 
     while node.wait(CYCLE_TIME).is_ok() {
-        ingress.send_copy(counter)?;
-
-        if let Some(mut work) = worker_0.receive()? {
+        while let Some(mut work) = worker.receive()? {
+            let before = *work.payload_mut();
             *work.payload_mut() += 10;
+            let after = *work.payload_mut();
             work.send()?;
+            coutln!("worker transformed: {before} -> {after}");
         }
-
-        if let Some(mut work) = worker_1.receive()? {
-            *work.payload_mut() *= 2;
-            work.send()?;
-        }
-
-        while let Some(sample) = egress.receive()? {
-            coutln!("ingress={} egress={}", counter, *sample);
-        }
-
-        counter += 1;
     }
 
     coutln!("exit");

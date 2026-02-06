@@ -1,15 +1,30 @@
 # Pipeline
 
-This example demonstrates the staged `Pipeline` API in one process.
-It creates one ingress, two workers, and one egress endpoint:
+This example demonstrates the staged `Pipeline` API with three separate
+processes:
 
 * ingress injects `u64` samples
 * worker stage `0` adds `10`
-* worker stage `1` multiplies by `2`
 * egress receives and prints the final values
 
 ## How to Run
 
+Open three terminals.
+
+### Terminal 1
+
 ```sh
-cargo run --example pipeline
+cargo run --example pipeline_egress
+```
+
+### Terminal 2
+
+```sh
+cargo run --example pipeline_worker
+```
+
+### Terminal 3
+
+```sh
+cargo run --example pipeline_ingress
 ```

@@ -42,6 +42,8 @@ TYPED_TEST(ServiceTest, does_exist_works) {
             .value());
     ASSERT_FALSE(
         Service<SERVICE_TYPE>::does_exist(service_name, Config::global_config(), MessagingPattern::Blackboard).value());
+    ASSERT_FALSE(
+        Service<SERVICE_TYPE>::does_exist(service_name, Config::global_config(), MessagingPattern::Pipeline).value());
 
     auto node = NodeBuilder().create<SERVICE_TYPE>().value();
 
@@ -59,6 +61,9 @@ TYPED_TEST(ServiceTest, does_exist_works) {
         ASSERT_FALSE(
             Service<SERVICE_TYPE>::does_exist(service_name, Config::global_config(), MessagingPattern::Blackboard)
                 .value());
+        ASSERT_FALSE(
+            Service<SERVICE_TYPE>::does_exist(service_name, Config::global_config(), MessagingPattern::Pipeline)
+                .value());
     }
 
     ASSERT_FALSE(
@@ -71,6 +76,8 @@ TYPED_TEST(ServiceTest, does_exist_works) {
             .value());
     ASSERT_FALSE(
         Service<SERVICE_TYPE>::does_exist(service_name, Config::global_config(), MessagingPattern::Blackboard).value());
+    ASSERT_FALSE(
+        Service<SERVICE_TYPE>::does_exist(service_name, Config::global_config(), MessagingPattern::Pipeline).value());
 }
 
 TYPED_TEST(ServiceTest, list_works) {
@@ -110,6 +117,8 @@ TYPED_TEST(ServiceTest, list_works) {
         case MessagingPattern::Blackboard:
             EXPECT_THAT(details.static_details.name(), StrEq(service_name_4.to_string().unchecked_access().c_str()));
             EXPECT_THAT(details.static_details.id(), StrEq(sut_4.service_id().c_str()));
+            break;
+        case MessagingPattern::Pipeline:
             break;
         }
 
@@ -223,6 +232,8 @@ TYPED_TEST(ServiceTest, list_works_with_attributes) {
                 return CallbackProgression::Continue;
             });
             EXPECT_THAT(counter, Eq(1));
+            break;
+        case MessagingPattern::Pipeline:
             break;
         }
 

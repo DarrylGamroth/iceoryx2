@@ -169,6 +169,27 @@ create_exception!(
 
 create_exception!(
     iceoryx2_ffi_python,
+    PipelineOpenError,
+    PyException,
+    "Errors caused when opening a pipeline service."
+);
+
+create_exception!(
+    iceoryx2_ffi_python,
+    PipelineCreateError,
+    PyException,
+    "Errors caused when creating a pipeline service."
+);
+
+create_exception!(
+    iceoryx2_ffi_python,
+    PipelineOpenOrCreateError,
+    PyException,
+    "Errors caused when open or creating a pipeline service."
+);
+
+create_exception!(
+    iceoryx2_ffi_python,
     ReceiveError,
     PyException,
     "Errors caused when receiving data."

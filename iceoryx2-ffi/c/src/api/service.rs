@@ -46,6 +46,7 @@ pub enum iox2_messaging_pattern_e {
     EVENT,
     REQUEST_RESPONSE,
     BLACKBOARD,
+    PIPELINE,
 }
 
 pub(crate) type IpcService = iceoryx2::prelude::ipc_threadsafe::Service;
@@ -58,6 +59,7 @@ impl From<iox2_messaging_pattern_e> for MessagingPattern {
             iox2_messaging_pattern_e::PUBLISH_SUBSCRIBE => MessagingPattern::PublishSubscribe,
             iox2_messaging_pattern_e::REQUEST_RESPONSE => MessagingPattern::RequestResponse,
             iox2_messaging_pattern_e::BLACKBOARD => MessagingPattern::Blackboard,
+            iox2_messaging_pattern_e::PIPELINE => MessagingPattern::Pipeline,
         }
     }
 }
@@ -79,7 +81,10 @@ impl From<&iceoryx2::service::static_config::messaging_pattern::MessagingPattern
             iceoryx2::service::static_config::messaging_pattern::MessagingPattern::Blackboard(_) => {
                 iox2_messaging_pattern_e::BLACKBOARD
             }
-            _ => unreachable!()
+            iceoryx2::service::static_config::messaging_pattern::MessagingPattern::Pipeline(_) => {
+                iox2_messaging_pattern_e::PIPELINE
+            }
+            _ => unreachable!(),
         }
     }
 }

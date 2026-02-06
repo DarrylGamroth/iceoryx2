@@ -29,6 +29,7 @@ pub mod request_response;
 pub mod messaging_pattern;
 
 pub mod blackboard;
+pub mod pipeline;
 
 use alloc::format;
 
@@ -115,6 +116,22 @@ impl StaticConfig {
             service_id: ServiceId::new::<Hasher>(
                 service_name,
                 crate::service::messaging_pattern::MessagingPattern::Blackboard,
+            ),
+            service_name: *service_name,
+            messaging_pattern,
+            attributes: AttributeSet::new(),
+        }
+    }
+
+    pub(crate) fn new_pipeline<Hasher: Hash>(
+        service_name: &ServiceName,
+        config: &config::Config,
+    ) -> Self {
+        let messaging_pattern = MessagingPattern::Pipeline(pipeline::StaticConfig::new(config));
+        Self {
+            service_id: ServiceId::new::<Hasher>(
+                service_name,
+                crate::service::messaging_pattern::MessagingPattern::Pipeline,
             ),
             service_name: *service_name,
             messaging_pattern,
@@ -223,6 +240,26 @@ impl StaticConfig {
             MessagingPattern::Blackboard(ref mut v) => v,
             m => {
                 fatal_panic!(from origin, "This should never happen! Trying to access blackboard::StaticConfig when the messaging pattern is actually {:?}!", m)
+            }
+        }
+    }
+
+    /// Unwrap the Pipeline static configuration.
+    pub fn pipeline(&self) -> &pipeline::StaticConfig {
+        match &self.messaging_pattern {
+            MessagingPattern::Pipeline(ref v) => v,
+            m => {
+                fatal_panic!(from self, "This should never happen! Trying to access pipeline::StaticConfig when the messaging pattern is actually {:?}!", m)
+            }
+        }
+    }
+
+    pub(crate) fn pipeline_mut(&mut self) -> &mut pipeline::StaticConfig {
+        let origin = format!("{self:?}");
+        match &mut self.messaging_pattern {
+            MessagingPattern::Pipeline(ref mut v) => v,
+            m => {
+                fatal_panic!(from origin, "This should never happen! Trying to access pipeline::StaticConfig when the messaging pattern is actually {:?}!", m)
             }
         }
     }

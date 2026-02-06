@@ -37,6 +37,7 @@
 #include "iox2/server_error.hpp"
 #include "iox2/service_builder_blackboard_error.hpp"
 #include "iox2/service_builder_event_error.hpp"
+#include "iox2/service_builder_pipeline_error.hpp"
 #include "iox2/service_builder_publish_subscribe_error.hpp"
 #include "iox2/service_builder_request_response_error.hpp"
 #include "iox2/service_error_enums.hpp"
@@ -247,6 +248,8 @@ constexpr auto from<iox2::MessagingPattern, iox2_messaging_pattern_e>(const iox2
         return iox2_messaging_pattern_e_REQUEST_RESPONSE;
     case iox2::MessagingPattern::Blackboard:
         return iox2_messaging_pattern_e_BLACKBOARD;
+    case iox2::MessagingPattern::Pipeline:
+        return iox2_messaging_pattern_e_PIPELINE;
     }
 
     IOX2_UNREACHABLE();
@@ -1123,6 +1126,278 @@ from<iox2::RequestResponseOpenOrCreateError, const char*>(const iox2::RequestRes
 }
 
 template <>
+constexpr auto from<int, iox2::PipelineOpenError>(const int value) noexcept -> iox2::PipelineOpenError {
+    const auto error = static_cast<iox2_pipeline_open_or_create_error_e>(value);
+    switch (error) {
+    case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_EXIST:
+        return iox2::PipelineOpenError::DoesNotExist;
+    case iox2_pipeline_open_or_create_error_e_O_INSUFFICIENT_PERMISSIONS:
+        return iox2::PipelineOpenError::InsufficientPermissions;
+    case iox2_pipeline_open_or_create_error_e_O_SERVICE_IN_CORRUPTED_STATE:
+        return iox2::PipelineOpenError::ServiceInCorruptedState;
+    case iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_MESSAGING_PATTERN:
+        return iox2::PipelineOpenError::IncompatibleMessagingPattern;
+    case iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_ATTRIBUTES:
+        return iox2::PipelineOpenError::IncompatibleAttributes;
+    case iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_PAYLOAD_TYPE:
+        return iox2::PipelineOpenError::IncompatiblePayloadType;
+    case iox2_pipeline_open_or_create_error_e_O_HANGS_IN_CREATION:
+        return iox2::PipelineOpenError::HangsInCreation;
+    case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_NODES:
+        return iox2::PipelineOpenError::DoesNotSupportRequestedAmountOfNodes;
+    case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_STAGES:
+        return iox2::PipelineOpenError::DoesNotSupportRequestedAmountOfStages;
+    case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_IN_FLIGHT_SAMPLES:
+        return iox2::PipelineOpenError::DoesNotSupportRequestedInFlightSamples;
+    case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_INITIAL_MAX_SLICE_LEN:
+        return iox2::PipelineOpenError::DoesNotSupportRequestedInitialMaxSliceLen;
+    case iox2_pipeline_open_or_create_error_e_O_EXCEEDS_MAX_NUMBER_OF_NODES:
+        return iox2::PipelineOpenError::ExceedsMaxNumberOfNodes;
+    case iox2_pipeline_open_or_create_error_e_O_IS_MARKED_FOR_DESTRUCTION:
+        return iox2::PipelineOpenError::IsMarkedForDestruction;
+    case iox2_pipeline_open_or_create_error_e_O_INVALID_CONFIGURATION:
+        return iox2::PipelineOpenError::InvalidConfiguration;
+    case iox2_pipeline_open_or_create_error_e_O_EDGE_FAILURE:
+        return iox2::PipelineOpenError::EdgeFailure;
+    case iox2_pipeline_open_or_create_error_e_O_INTERNAL_FAILURE:
+        return iox2::PipelineOpenError::InternalFailure;
+    default:
+        IOX2_UNREACHABLE();
+    }
+}
+
+template <>
+constexpr auto
+from<iox2::PipelineOpenError, iox2_pipeline_open_or_create_error_e>(const iox2::PipelineOpenError value) noexcept
+    -> iox2_pipeline_open_or_create_error_e {
+    switch (value) {
+    case iox2::PipelineOpenError::DoesNotExist:
+        return iox2_pipeline_open_or_create_error_e_O_DOES_NOT_EXIST;
+    case iox2::PipelineOpenError::InsufficientPermissions:
+        return iox2_pipeline_open_or_create_error_e_O_INSUFFICIENT_PERMISSIONS;
+    case iox2::PipelineOpenError::ServiceInCorruptedState:
+        return iox2_pipeline_open_or_create_error_e_O_SERVICE_IN_CORRUPTED_STATE;
+    case iox2::PipelineOpenError::IncompatibleMessagingPattern:
+        return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_MESSAGING_PATTERN;
+    case iox2::PipelineOpenError::IncompatibleAttributes:
+        return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_ATTRIBUTES;
+    case iox2::PipelineOpenError::IncompatiblePayloadType:
+        return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_PAYLOAD_TYPE;
+    case iox2::PipelineOpenError::HangsInCreation:
+        return iox2_pipeline_open_or_create_error_e_O_HANGS_IN_CREATION;
+    case iox2::PipelineOpenError::DoesNotSupportRequestedAmountOfNodes:
+        return iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_NODES;
+    case iox2::PipelineOpenError::DoesNotSupportRequestedAmountOfStages:
+        return iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_STAGES;
+    case iox2::PipelineOpenError::DoesNotSupportRequestedInFlightSamples:
+        return iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_IN_FLIGHT_SAMPLES;
+    case iox2::PipelineOpenError::DoesNotSupportRequestedInitialMaxSliceLen:
+        return iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_INITIAL_MAX_SLICE_LEN;
+    case iox2::PipelineOpenError::ExceedsMaxNumberOfNodes:
+        return iox2_pipeline_open_or_create_error_e_O_EXCEEDS_MAX_NUMBER_OF_NODES;
+    case iox2::PipelineOpenError::IsMarkedForDestruction:
+        return iox2_pipeline_open_or_create_error_e_O_IS_MARKED_FOR_DESTRUCTION;
+    case iox2::PipelineOpenError::InvalidConfiguration:
+        return iox2_pipeline_open_or_create_error_e_O_INVALID_CONFIGURATION;
+    case iox2::PipelineOpenError::EdgeFailure:
+        return iox2_pipeline_open_or_create_error_e_O_EDGE_FAILURE;
+    case iox2::PipelineOpenError::InternalFailure:
+        return iox2_pipeline_open_or_create_error_e_O_INTERNAL_FAILURE;
+    default:
+        IOX2_UNREACHABLE();
+    }
+}
+
+template <>
+inline auto from<iox2::PipelineOpenError, const char*>(const iox2::PipelineOpenError value) noexcept -> const char* {
+    return iox2_pipeline_open_or_create_error_string(iox2::bb::into<iox2_pipeline_open_or_create_error_e>(value));
+}
+
+template <>
+constexpr auto from<int, iox2::PipelineCreateError>(const int value) noexcept -> iox2::PipelineCreateError {
+    const auto error = static_cast<iox2_pipeline_open_or_create_error_e>(value);
+    switch (error) {
+    case iox2_pipeline_open_or_create_error_e_C_SERVICE_IN_CORRUPTED_STATE:
+        return iox2::PipelineCreateError::ServiceInCorruptedState;
+    case iox2_pipeline_open_or_create_error_e_C_INTERNAL_FAILURE:
+        return iox2::PipelineCreateError::InternalFailure;
+    case iox2_pipeline_open_or_create_error_e_C_IS_BEING_CREATED_BY_ANOTHER_INSTANCE:
+        return iox2::PipelineCreateError::IsBeingCreatedByAnotherInstance;
+    case iox2_pipeline_open_or_create_error_e_C_ALREADY_EXISTS:
+        return iox2::PipelineCreateError::AlreadyExists;
+    case iox2_pipeline_open_or_create_error_e_C_HANGS_IN_CREATION:
+        return iox2::PipelineCreateError::HangsInCreation;
+    case iox2_pipeline_open_or_create_error_e_C_INSUFFICIENT_PERMISSIONS:
+        return iox2::PipelineCreateError::InsufficientPermissions;
+    case iox2_pipeline_open_or_create_error_e_C_INVALID_CONFIGURATION:
+        return iox2::PipelineCreateError::InvalidConfiguration;
+    case iox2_pipeline_open_or_create_error_e_C_EDGE_FAILURE:
+        return iox2::PipelineCreateError::EdgeFailure;
+    default:
+        IOX2_UNREACHABLE();
+    }
+}
+
+template <>
+constexpr auto
+from<iox2::PipelineCreateError, iox2_pipeline_open_or_create_error_e>(const iox2::PipelineCreateError value) noexcept
+    -> iox2_pipeline_open_or_create_error_e {
+    switch (value) {
+    case iox2::PipelineCreateError::ServiceInCorruptedState:
+        return iox2_pipeline_open_or_create_error_e_C_SERVICE_IN_CORRUPTED_STATE;
+    case iox2::PipelineCreateError::InternalFailure:
+        return iox2_pipeline_open_or_create_error_e_C_INTERNAL_FAILURE;
+    case iox2::PipelineCreateError::IsBeingCreatedByAnotherInstance:
+        return iox2_pipeline_open_or_create_error_e_C_IS_BEING_CREATED_BY_ANOTHER_INSTANCE;
+    case iox2::PipelineCreateError::AlreadyExists:
+        return iox2_pipeline_open_or_create_error_e_C_ALREADY_EXISTS;
+    case iox2::PipelineCreateError::HangsInCreation:
+        return iox2_pipeline_open_or_create_error_e_C_HANGS_IN_CREATION;
+    case iox2::PipelineCreateError::InsufficientPermissions:
+        return iox2_pipeline_open_or_create_error_e_C_INSUFFICIENT_PERMISSIONS;
+    case iox2::PipelineCreateError::InvalidConfiguration:
+        return iox2_pipeline_open_or_create_error_e_C_INVALID_CONFIGURATION;
+    case iox2::PipelineCreateError::EdgeFailure:
+        return iox2_pipeline_open_or_create_error_e_C_EDGE_FAILURE;
+    default:
+        IOX2_UNREACHABLE();
+    }
+}
+
+template <>
+inline auto from<iox2::PipelineCreateError, const char*>(const iox2::PipelineCreateError value) noexcept
+    -> const char* {
+    return iox2_pipeline_open_or_create_error_string(iox2::bb::into<iox2_pipeline_open_or_create_error_e>(value));
+}
+
+template <>
+constexpr auto from<int, iox2::PipelineOpenOrCreateError>(const int value) noexcept -> iox2::PipelineOpenOrCreateError {
+    const auto error = static_cast<iox2_pipeline_open_or_create_error_e>(value);
+    switch (error) {
+    case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_EXIST:
+        return iox2::PipelineOpenOrCreateError::OpenDoesNotExist;
+    case iox2_pipeline_open_or_create_error_e_O_INSUFFICIENT_PERMISSIONS:
+        return iox2::PipelineOpenOrCreateError::OpenInsufficientPermissions;
+    case iox2_pipeline_open_or_create_error_e_O_SERVICE_IN_CORRUPTED_STATE:
+        return iox2::PipelineOpenOrCreateError::OpenServiceInCorruptedState;
+    case iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_MESSAGING_PATTERN:
+        return iox2::PipelineOpenOrCreateError::OpenIncompatibleMessagingPattern;
+    case iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_ATTRIBUTES:
+        return iox2::PipelineOpenOrCreateError::OpenIncompatibleAttributes;
+    case iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_PAYLOAD_TYPE:
+        return iox2::PipelineOpenOrCreateError::OpenIncompatiblePayloadType;
+    case iox2_pipeline_open_or_create_error_e_O_HANGS_IN_CREATION:
+        return iox2::PipelineOpenOrCreateError::OpenHangsInCreation;
+    case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_NODES:
+        return iox2::PipelineOpenOrCreateError::OpenDoesNotSupportRequestedAmountOfNodes;
+    case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_STAGES:
+        return iox2::PipelineOpenOrCreateError::OpenDoesNotSupportRequestedAmountOfStages;
+    case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_IN_FLIGHT_SAMPLES:
+        return iox2::PipelineOpenOrCreateError::OpenDoesNotSupportRequestedInFlightSamples;
+    case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_INITIAL_MAX_SLICE_LEN:
+        return iox2::PipelineOpenOrCreateError::OpenDoesNotSupportRequestedInitialMaxSliceLen;
+    case iox2_pipeline_open_or_create_error_e_O_EXCEEDS_MAX_NUMBER_OF_NODES:
+        return iox2::PipelineOpenOrCreateError::OpenExceedsMaxNumberOfNodes;
+    case iox2_pipeline_open_or_create_error_e_O_IS_MARKED_FOR_DESTRUCTION:
+        return iox2::PipelineOpenOrCreateError::OpenIsMarkedForDestruction;
+    case iox2_pipeline_open_or_create_error_e_O_INVALID_CONFIGURATION:
+        return iox2::PipelineOpenOrCreateError::OpenInvalidConfiguration;
+    case iox2_pipeline_open_or_create_error_e_O_EDGE_FAILURE:
+        return iox2::PipelineOpenOrCreateError::OpenEdgeFailure;
+    case iox2_pipeline_open_or_create_error_e_O_INTERNAL_FAILURE:
+        return iox2::PipelineOpenOrCreateError::OpenInternalFailure;
+
+    case iox2_pipeline_open_or_create_error_e_C_SERVICE_IN_CORRUPTED_STATE:
+        return iox2::PipelineOpenOrCreateError::CreateServiceInCorruptedState;
+    case iox2_pipeline_open_or_create_error_e_C_INTERNAL_FAILURE:
+        return iox2::PipelineOpenOrCreateError::CreateInternalFailure;
+    case iox2_pipeline_open_or_create_error_e_C_IS_BEING_CREATED_BY_ANOTHER_INSTANCE:
+        return iox2::PipelineOpenOrCreateError::CreateIsBeingCreatedByAnotherInstance;
+    case iox2_pipeline_open_or_create_error_e_C_ALREADY_EXISTS:
+        return iox2::PipelineOpenOrCreateError::CreateAlreadyExists;
+    case iox2_pipeline_open_or_create_error_e_C_HANGS_IN_CREATION:
+        return iox2::PipelineOpenOrCreateError::CreateHangsInCreation;
+    case iox2_pipeline_open_or_create_error_e_C_INSUFFICIENT_PERMISSIONS:
+        return iox2::PipelineOpenOrCreateError::CreateInsufficientPermissions;
+    case iox2_pipeline_open_or_create_error_e_C_INVALID_CONFIGURATION:
+        return iox2::PipelineOpenOrCreateError::CreateInvalidConfiguration;
+    case iox2_pipeline_open_or_create_error_e_C_EDGE_FAILURE:
+        return iox2::PipelineOpenOrCreateError::CreateEdgeFailure;
+    case iox2_pipeline_open_or_create_error_e_SYSTEM_IN_FLUX:
+        return iox2::PipelineOpenOrCreateError::SystemInFlux;
+    default:
+        IOX2_UNREACHABLE();
+    }
+}
+
+template <>
+constexpr auto from<iox2::PipelineOpenOrCreateError, iox2_pipeline_open_or_create_error_e>(
+    const iox2::PipelineOpenOrCreateError value) noexcept -> iox2_pipeline_open_or_create_error_e {
+    switch (value) {
+    case iox2::PipelineOpenOrCreateError::OpenDoesNotExist:
+        return iox2_pipeline_open_or_create_error_e_O_DOES_NOT_EXIST;
+    case iox2::PipelineOpenOrCreateError::OpenInsufficientPermissions:
+        return iox2_pipeline_open_or_create_error_e_O_INSUFFICIENT_PERMISSIONS;
+    case iox2::PipelineOpenOrCreateError::OpenServiceInCorruptedState:
+        return iox2_pipeline_open_or_create_error_e_O_SERVICE_IN_CORRUPTED_STATE;
+    case iox2::PipelineOpenOrCreateError::OpenIncompatibleMessagingPattern:
+        return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_MESSAGING_PATTERN;
+    case iox2::PipelineOpenOrCreateError::OpenIncompatibleAttributes:
+        return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_ATTRIBUTES;
+    case iox2::PipelineOpenOrCreateError::OpenIncompatiblePayloadType:
+        return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_PAYLOAD_TYPE;
+    case iox2::PipelineOpenOrCreateError::OpenHangsInCreation:
+        return iox2_pipeline_open_or_create_error_e_O_HANGS_IN_CREATION;
+    case iox2::PipelineOpenOrCreateError::OpenDoesNotSupportRequestedAmountOfNodes:
+        return iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_NODES;
+    case iox2::PipelineOpenOrCreateError::OpenDoesNotSupportRequestedAmountOfStages:
+        return iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_STAGES;
+    case iox2::PipelineOpenOrCreateError::OpenDoesNotSupportRequestedInFlightSamples:
+        return iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_IN_FLIGHT_SAMPLES;
+    case iox2::PipelineOpenOrCreateError::OpenDoesNotSupportRequestedInitialMaxSliceLen:
+        return iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_INITIAL_MAX_SLICE_LEN;
+    case iox2::PipelineOpenOrCreateError::OpenExceedsMaxNumberOfNodes:
+        return iox2_pipeline_open_or_create_error_e_O_EXCEEDS_MAX_NUMBER_OF_NODES;
+    case iox2::PipelineOpenOrCreateError::OpenIsMarkedForDestruction:
+        return iox2_pipeline_open_or_create_error_e_O_IS_MARKED_FOR_DESTRUCTION;
+    case iox2::PipelineOpenOrCreateError::OpenInvalidConfiguration:
+        return iox2_pipeline_open_or_create_error_e_O_INVALID_CONFIGURATION;
+    case iox2::PipelineOpenOrCreateError::OpenEdgeFailure:
+        return iox2_pipeline_open_or_create_error_e_O_EDGE_FAILURE;
+    case iox2::PipelineOpenOrCreateError::OpenInternalFailure:
+        return iox2_pipeline_open_or_create_error_e_O_INTERNAL_FAILURE;
+
+    case iox2::PipelineOpenOrCreateError::CreateServiceInCorruptedState:
+        return iox2_pipeline_open_or_create_error_e_C_SERVICE_IN_CORRUPTED_STATE;
+    case iox2::PipelineOpenOrCreateError::CreateInternalFailure:
+        return iox2_pipeline_open_or_create_error_e_C_INTERNAL_FAILURE;
+    case iox2::PipelineOpenOrCreateError::CreateIsBeingCreatedByAnotherInstance:
+        return iox2_pipeline_open_or_create_error_e_C_IS_BEING_CREATED_BY_ANOTHER_INSTANCE;
+    case iox2::PipelineOpenOrCreateError::CreateAlreadyExists:
+        return iox2_pipeline_open_or_create_error_e_C_ALREADY_EXISTS;
+    case iox2::PipelineOpenOrCreateError::CreateHangsInCreation:
+        return iox2_pipeline_open_or_create_error_e_C_HANGS_IN_CREATION;
+    case iox2::PipelineOpenOrCreateError::CreateInsufficientPermissions:
+        return iox2_pipeline_open_or_create_error_e_C_INSUFFICIENT_PERMISSIONS;
+    case iox2::PipelineOpenOrCreateError::CreateInvalidConfiguration:
+        return iox2_pipeline_open_or_create_error_e_C_INVALID_CONFIGURATION;
+    case iox2::PipelineOpenOrCreateError::CreateEdgeFailure:
+        return iox2_pipeline_open_or_create_error_e_C_EDGE_FAILURE;
+    case iox2::PipelineOpenOrCreateError::SystemInFlux:
+        return iox2_pipeline_open_or_create_error_e_SYSTEM_IN_FLUX;
+    default:
+        IOX2_UNREACHABLE();
+    }
+}
+
+template <>
+inline auto
+from<iox2::PipelineOpenOrCreateError, const char*>(const iox2::PipelineOpenOrCreateError value) noexcept
+    -> const char* {
+    return iox2_pipeline_open_or_create_error_string(iox2::bb::into<iox2_pipeline_open_or_create_error_e>(value));
+}
+
+template <>
 constexpr auto from<int, iox2::BlackboardCreateError>(const int value) noexcept -> iox2::BlackboardCreateError {
     const auto error = static_cast<iox2_blackboard_create_error_e>(value);
     switch (error) {
@@ -1886,6 +2161,8 @@ constexpr auto from<int, iox2::MessagingPattern>(const int value) noexcept -> io
         return iox2::MessagingPattern::RequestResponse;
     case iox2_messaging_pattern_e_BLACKBOARD:
         return iox2::MessagingPattern::Blackboard;
+    case iox2_messaging_pattern_e_PIPELINE:
+        return iox2::MessagingPattern::Pipeline;
     }
 
     IOX2_UNREACHABLE();

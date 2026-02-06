@@ -16,10 +16,12 @@ use pyo3::prelude::*;
 use crate::service_builder_blackboard::{
     ServiceBuilderBlackboardCreatorType, ServiceBuilderBlackboardOpenerType,
 };
+use crate::service_builder_pipeline::ServiceBuilderPipelineType;
 use crate::service_builder_request_response::ServiceBuilderRequestResponseType;
 use crate::{
     service_builder_blackboard::{ServiceBuilderBlackboardCreator, ServiceBuilderBlackboardOpener},
     service_builder_event::{ServiceBuilderEvent, ServiceBuilderEventType},
+    service_builder_pipeline::ServiceBuilderPipeline,
     service_builder_publish_subscribe::{
         ServiceBuilderPublishSubscribe, ServiceBuilderPublishSubscribeType,
     },
@@ -66,6 +68,24 @@ impl ServiceBuilder {
                 ServiceBuilderPublishSubscribe::new(ServiceBuilderPublishSubscribeType::Local(
                     this.publish_subscribe::<[CustomPayloadMarker]>()
                         .user_header::<CustomHeaderMarker>(),
+                ))
+            }
+        }
+    }
+
+    /// Create a new builder to create a `MessagingPattern::Pipeline` `Service`.
+    pub fn __pipeline(&self) -> ServiceBuilderPipeline {
+        match &self.0 {
+            ServiceBuilderType::Ipc(v) => {
+                let this = v.clone();
+                ServiceBuilderPipeline::new(ServiceBuilderPipelineType::Ipc(
+                    this.pipeline::<[CustomPayloadMarker]>(),
+                ))
+            }
+            ServiceBuilderType::Local(v) => {
+                let this = v.clone();
+                ServiceBuilderPipeline::new(ServiceBuilderPipelineType::Local(
+                    this.pipeline::<[CustomPayloadMarker]>(),
                 ))
             }
         }

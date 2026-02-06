@@ -15,6 +15,7 @@
 
 #include "iox2/service_builder_blackboard.hpp"
 #include "iox2/service_builder_event.hpp"
+#include "iox2/service_builder_pipeline.hpp"
 #include "iox2/service_builder_publish_subscribe.hpp"
 #include "iox2/service_builder_request_response.hpp"
 #include "iox2/service_type.hpp"
@@ -44,6 +45,11 @@ class ServiceBuilder {
     /// [`MessagingPattern::RequestResponse`] [`Service`].
     template <typename RequestPayload, typename ResponsePayload>
     auto request_response() && -> ServiceBuilderRequestResponse<RequestPayload, void, ResponsePayload, void, S>;
+
+    /// Create a new builder to create a
+    /// [`MessagingPattern::Pipeline`] [`Service`].
+    template <typename Payload>
+    auto pipeline() && -> ServiceBuilderPipeline<Payload, S>;
 
     /// Create a new builder to create a
     /// [`MessagingPattern::Blackboard`] [`Service`].
@@ -84,6 +90,12 @@ template <typename RequestPayload, typename ResponsePayload>
 inline auto ServiceBuilder<
     S>::request_response() && -> ServiceBuilderRequestResponse<RequestPayload, void, ResponsePayload, void, S> {
     return ServiceBuilderRequestResponse<RequestPayload, void, ResponsePayload, void, S> { m_handle };
+}
+
+template <ServiceType S>
+template <typename Payload>
+inline auto ServiceBuilder<S>::pipeline() && -> ServiceBuilderPipeline<Payload, S> {
+    return ServiceBuilderPipeline<Payload, S> { m_handle };
 }
 
 template <ServiceType S>

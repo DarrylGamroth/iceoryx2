@@ -181,3 +181,70 @@ fn creating_worker_with_invalid_stage_fails() {
     assert_that!(result, is_err);
     assert_that!(result.err().unwrap(), eq WorkerCreateError::StageOutOfBounds);
 }
+
+#[test]
+fn worker_can_discard_sample() {
+    let _watchdog = Watchdog::new();
+    type ServiceType = ipc::Service;
+
+    let service_name = generate_service_name();
+    let config = generate_isolated_config();
+    let node = NodeBuilder::new()
+        .config(&config)
+        .create::<ServiceType>()
+        .unwrap();
+
+    let pipeline = node
+        .service_builder(&service_name)
+        .pipeline::<u64>()
+        .number_of_stages(1)
+        .max_in_flight_samples(8)
+        .create()
+        .unwrap();
+
+    let ingress = pipeline.ingress_builder().create().unwrap();
+    let worker = pipeline.worker_builder(0).create().unwrap();
+    let egress = pipeline.egress_builder().create().unwrap();
+
+    ingress.send_copy(7).unwrap();
+
+    let mut work = None;
+    for _ in 0..10_000 {
+        work = worker.receive().unwrap();
+        if work.is_some() {
+            break;
+        }
+    }
+
+    let work = work.expect("worker must receive sample");
+    work.discard();
+
+    for _ in 0..100 {
+        let sample = egress.receive().unwrap();
+        assert_that!(sample, is_none);
+    }
+
+    ingress.send_copy(21).unwrap();
+    let mut work = None;
+    for _ in 0..10_000 {
+        work = worker.receive().unwrap();
+        if work.is_some() {
+            break;
+        }
+    }
+
+    let mut work = work.expect("worker must receive second sample");
+    *work.payload_mut() += 1;
+    work.send().unwrap();
+
+    let mut final_sample = None;
+    for _ in 0..10_000 {
+        final_sample = egress.receive().unwrap();
+        if final_sample.is_some() {
+            break;
+        }
+    }
+
+    let final_sample = final_sample.expect("egress must receive second sample");
+    assert_that!(*final_sample, eq 22);
+}

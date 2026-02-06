@@ -16,11 +16,11 @@ use core::ffi::c_char;
 
 use iceoryx2::service::static_config::messaging_pattern::MessagingPattern;
 use iceoryx2::service::static_config::StaticConfig;
-use iceoryx2_log::fatal_panic;
 
 use crate::{
     iox2_messaging_pattern_e, iox2_static_config_blackboard_t, iox2_static_config_event_t,
-    iox2_static_config_publish_subscribe_t, iox2_static_config_request_response_t,
+    iox2_static_config_pipeline_t, iox2_static_config_publish_subscribe_t,
+    iox2_static_config_request_response_t,
     IOX2_SERVICE_ID_LENGTH, IOX2_SERVICE_NAME_LENGTH,
 };
 
@@ -33,6 +33,7 @@ pub union iox2_static_config_details_t {
     pub publish_subscribe: iox2_static_config_publish_subscribe_t,
     pub request_response: iox2_static_config_request_response_t,
     pub blackboard: iox2_static_config_blackboard_t,
+    pub pipeline: iox2_static_config_pipeline_t,
 }
 
 #[derive(Clone, Copy)]
@@ -94,8 +95,11 @@ impl From<&StaticConfig> for iox2_static_config_t {
                     MessagingPattern::Blackboard(blackboard) => iox2_static_config_details_t {
                         blackboard: blackboard.into(),
                     },
+                    MessagingPattern::Pipeline(pipeline) => iox2_static_config_details_t {
+                        pipeline: pipeline.into(),
+                    },
                     _ => {
-                        fatal_panic!(from "StaticConfig", "missing implementation for messaging pattern.")
+                        unreachable!()
                     }
                 }
             },

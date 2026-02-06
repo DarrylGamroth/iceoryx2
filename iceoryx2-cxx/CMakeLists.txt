@@ -80,6 +80,7 @@ add_library(iceoryx2-cxx-object-lib OBJECT
     src/static_config.cpp
     src/static_config_blackboard.cpp
     src/static_config_event.cpp
+    src/static_config_pipeline.cpp
     src/static_config_publish_subscribe.cpp
     src/static_config_request_response.cpp
     src/subscriber_details.cpp
