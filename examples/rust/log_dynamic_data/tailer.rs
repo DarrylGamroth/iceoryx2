@@ -27,6 +27,9 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     let log = node
         .service_builder(&"Dynamic/Log".try_into()?)
         .log::<[u8]>()
+        .retention_size(8)
+        .tailer_max_buffer_size(8)
+        .enable_safe_overflow(false)
         .open_or_create()?;
 
     let tailer = log.tailer_builder().create()?;

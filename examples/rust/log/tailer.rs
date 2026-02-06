@@ -28,19 +28,24 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     let log = node
         .service_builder(&"My/Funk/LogService".try_into()?)
         .log::<TransmissionData>()
+        .retention_size(4)
+        .tailer_max_buffer_size(4)
+        .enable_safe_overflow(true)
         .open_or_create()?;
 
     let tailer = log.tailer_builder().create()?;
+    let mut expected_sequence = 1_u64;
 
     coutln!("Tailer ready to receive data!");
 
     while node.wait(CYCLE_TIME).is_ok() {
         while let Some(sample) = tailer.receive()? {
-            coutln!(
-                "received seq={} payload={:?}",
-                sample.header().sequence(),
-                sample.payload()
-            );
+            let sequence = sample.header().sequence();
+            if sequence != expected_sequence {
+                coutln!("gap detected: expected {expected_sequence}, got {sequence}");
+            }
+            coutln!("received seq={} payload={:?}", sequence, sample.payload());
+            expected_sequence = sequence + 1;
         }
     }
 

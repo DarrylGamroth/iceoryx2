@@ -29,20 +29,29 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         .service_builder(&"UserHeader/Log".try_into()?)
         .log::<u64>()
         .user_header::<CustomHeader>()
+        .retention_size(8)
+        .tailer_max_buffer_size(8)
+        .enable_safe_overflow(false)
         .open_or_create()?;
 
     let tailer = log.tailer_builder().create()?;
+    let mut expected_sequence = 1_u64;
 
     coutln!("Tailer ready to receive data!");
 
     while node.wait(CYCLE_TIME).is_ok() {
         while let Some(sample) = tailer.receive()? {
+            let sequence = sample.header().sequence();
+            if sequence != expected_sequence {
+                coutln!("gap detected: expected {expected_sequence}, got {sequence}");
+            }
             coutln!(
                 "received seq={} payload={} user_header={:?}",
-                sample.header().sequence(),
+                sequence,
                 *sample,
                 sample.user_header()
             );
+            expected_sequence = sequence + 1;
         }
     }
 

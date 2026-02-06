@@ -27,12 +27,18 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     let log = node
         .service_builder(&"Dynamic/Log".try_into()?)
         .log::<[u8]>()
+        .retention_size(8)
+        .tailer_max_buffer_size(8)
+        // Disable safe overflow and rely on appender strategy when tailers are full.
+        .enable_safe_overflow(false)
         .open_or_create()?;
 
     let appender = log
         .appender_builder()
         .initial_max_slice_len(16)
         .allocation_strategy(AllocationStrategy::PowerOfTwo)
+        // Demonstrates backpressure behavior when retention is full.
+        .unable_to_deliver_strategy(UnableToDeliverStrategy::Block)
         .create()?;
 
     let mut counter = 1;

@@ -29,9 +29,16 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         .service_builder(&"UserHeader/Log".try_into()?)
         .log::<u64>()
         .user_header::<CustomHeader>()
+        .retention_size(8)
+        .tailer_max_buffer_size(8)
+        // Disable safe overflow and drop when a tailer cannot accept more samples.
+        .enable_safe_overflow(false)
         .open_or_create()?;
 
-    let appender = log.appender_builder().create()?;
+    let appender = log
+        .appender_builder()
+        .unable_to_deliver_strategy(UnableToDeliverStrategy::DiscardSample)
+        .create()?;
 
     let mut counter: u64 = 0;
 

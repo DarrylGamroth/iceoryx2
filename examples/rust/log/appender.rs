@@ -18,7 +18,7 @@ use alloc::boxed::Box;
 use examples_common::TransmissionData;
 use iceoryx2::prelude::*;
 
-const CYCLE_TIME: Duration = Duration::from_secs(1);
+const CYCLE_TIME: Duration = Duration::from_millis(50);
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
     set_log_level_from_env_or(LogLevel::Info);
@@ -30,7 +30,11 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         .log::<TransmissionData>()
         .max_appenders(4)
         .max_tailers(16)
-        .retention_size(16)
+        // Keep retention tiny to make overflow behavior observable.
+        .retention_size(4)
+        .tailer_max_buffer_size(4)
+        // Safe overflow means oldest retained samples can be replaced.
+        .enable_safe_overflow(true)
         .open_or_create()?;
 
     let appender = log.appender_builder().create()?;

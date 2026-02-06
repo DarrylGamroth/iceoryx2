@@ -2,6 +2,12 @@
 
 This example illustrates the `log` messaging pattern with dynamic payloads (`[u8]`).
 
+It uses:
+- `enable_safe_overflow(false)`
+- appender `unable_to_deliver_strategy(UnableToDeliverStrategy::Block)`
+
+This demonstrates blocking backpressure when tailers cannot keep up.
+
 ## How to Run
 
 ### Terminal 1
