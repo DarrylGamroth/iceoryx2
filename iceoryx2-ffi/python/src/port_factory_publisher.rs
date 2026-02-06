@@ -17,6 +17,7 @@ use crate::{
     allocation_strategy::AllocationStrategy,
     error::PublisherCreateError,
     parc::Parc,
+    port_factory_pipeline::PortFactoryPipelineType,
     port_factory_publish_subscribe::PortFactoryPublishSubscribeType,
     publisher::{Publisher, PublisherType},
     type_storage::TypeStorage,
@@ -42,11 +43,16 @@ pub(crate) enum PortFactoryPublisherType {
     Local(Parc<LocalPortFactoryPublisher<'static>>),
 }
 
+pub(crate) enum PortFactoryPublisherFactoryType {
+    PublishSubscribe(Parc<PortFactoryPublishSubscribeType>),
+    Pipeline(Parc<PortFactoryPipelineType>),
+}
+
 #[pyclass]
 /// Factory to create a new `Publisher` port/endpoint for `MessagingPattern::PublishSubscribe`
 /// based communication.
 pub struct PortFactoryPublisher {
-    factory: Parc<PortFactoryPublishSubscribeType>,
+    factory: PortFactoryPublisherFactoryType,
     value: PortFactoryPublisherType,
     payload_type_details: TypeStorage,
     user_header_type_details: TypeStorage,
@@ -59,7 +65,7 @@ impl PortFactoryPublisher {
         user_header_type_details: TypeStorage,
     ) -> Self {
         Self {
-            factory: factory.clone(),
+            factory: PortFactoryPublisherFactoryType::PublishSubscribe(factory.clone()),
             value: match &*factory.lock() {
                 PortFactoryPublishSubscribeType::Ipc(v) => PortFactoryPublisherType::Ipc(unsafe {
                     Parc::new(core::mem::transmute::<
@@ -81,9 +87,94 @@ impl PortFactoryPublisher {
         }
     }
 
+    pub(crate) fn from_pipeline_ingress(
+        factory: Parc<PortFactoryPipelineType>,
+        payload_type_details: TypeStorage,
+        user_header_type_details: TypeStorage,
+    ) -> Self {
+        Self {
+            factory: PortFactoryPublisherFactoryType::Pipeline(factory.clone()),
+            value: match &*factory.lock() {
+                PortFactoryPipelineType::Ipc(v) => PortFactoryPublisherType::Ipc(unsafe {
+                    Parc::new(core::mem::transmute::<
+                        IpcPortFactoryPublisher<'_>,
+                        IpcPortFactoryPublisher<'static>,
+                    >(
+                        v.__internal_ingress_publisher_builder()
+                    ))
+                }),
+                PortFactoryPipelineType::Local(v) => PortFactoryPublisherType::Local(unsafe {
+                    Parc::new(core::mem::transmute::<
+                        LocalPortFactoryPublisher<'_>,
+                        LocalPortFactoryPublisher<'static>,
+                    >(
+                        v.__internal_ingress_publisher_builder()
+                    ))
+                }),
+            },
+            payload_type_details,
+            user_header_type_details,
+        }
+    }
+
+    pub(crate) fn from_pipeline_worker(
+        factory: Parc<PortFactoryPipelineType>,
+        stage_id: usize,
+        payload_type_details: TypeStorage,
+        user_header_type_details: TypeStorage,
+    ) -> Option<Self> {
+        let value = match &*factory.lock() {
+            PortFactoryPipelineType::Ipc(v) => {
+                let builder = v.__internal_worker_publisher_builder(stage_id)?;
+                PortFactoryPublisherType::Ipc(unsafe {
+                    Parc::new(core::mem::transmute::<
+                        IpcPortFactoryPublisher<'_>,
+                        IpcPortFactoryPublisher<'static>,
+                    >(builder))
+                })
+            }
+            PortFactoryPipelineType::Local(v) => {
+                let builder = v.__internal_worker_publisher_builder(stage_id)?;
+                PortFactoryPublisherType::Local(unsafe {
+                    Parc::new(core::mem::transmute::<
+                        LocalPortFactoryPublisher<'_>,
+                        LocalPortFactoryPublisher<'static>,
+                    >(builder))
+                })
+            }
+        };
+
+        Some(Self {
+            factory: PortFactoryPublisherFactoryType::Pipeline(factory),
+            value,
+            payload_type_details,
+            user_header_type_details,
+        })
+    }
+
+    fn with_factory_lock<R>(&self, callback: impl FnOnce() -> R) -> R {
+        match &self.factory {
+            PortFactoryPublisherFactoryType::PublishSubscribe(factory) => {
+                let _guard = factory.lock();
+                callback()
+            }
+            PortFactoryPublisherFactoryType::Pipeline(factory) => {
+                let _guard = factory.lock();
+                callback()
+            }
+        }
+    }
+
     fn clone_ipc(&self, value: IpcPortFactoryPublisher<'static>) -> Self {
         Self {
-            factory: self.factory.clone(),
+            factory: match &self.factory {
+                PortFactoryPublisherFactoryType::PublishSubscribe(factory) => {
+                    PortFactoryPublisherFactoryType::PublishSubscribe(factory.clone())
+                }
+                PortFactoryPublisherFactoryType::Pipeline(factory) => {
+                    PortFactoryPublisherFactoryType::Pipeline(factory.clone())
+                }
+            },
             value: PortFactoryPublisherType::Ipc(Parc::new(value)),
             payload_type_details: self.payload_type_details.clone(),
             user_header_type_details: self.user_header_type_details.clone(),
@@ -92,7 +183,14 @@ impl PortFactoryPublisher {
 
     fn clone_local(&self, value: LocalPortFactoryPublisher<'static>) -> Self {
         Self {
-            factory: self.factory.clone(),
+            factory: match &self.factory {
+                PortFactoryPublisherFactoryType::PublishSubscribe(factory) => {
+                    PortFactoryPublisherFactoryType::PublishSubscribe(factory.clone())
+                }
+                PortFactoryPublisherFactoryType::Pipeline(factory) => {
+                    PortFactoryPublisherFactoryType::Pipeline(factory.clone())
+                }
+            },
             value: PortFactoryPublisherType::Local(Parc::new(value)),
             payload_type_details: self.payload_type_details.clone(),
             user_header_type_details: self.user_header_type_details.clone(),
@@ -110,8 +208,7 @@ impl PortFactoryPublisher {
     /// Defines how many `SampleMut` the `Publisher` can loan with `Publisher::loan()` or
     /// `Publisher::loan_uninit()` in parallel.
     pub fn max_loaned_samples(&self, value: usize) -> Self {
-        let _guard = self.factory.lock();
-        match &self.value {
+        self.with_factory_lock(|| match &self.value {
             PortFactoryPublisherType::Ipc(v) => {
                 let this = unsafe { (*v.lock()).__internal_partial_clone() };
                 let this = this.max_loaned_samples(value);
@@ -122,13 +219,12 @@ impl PortFactoryPublisher {
                 let this = this.max_loaned_samples(value);
                 self.clone_local(this)
             }
-        }
+        })
     }
 
     /// Sets the `UnableToDeliverStrategy`.
     pub fn unable_to_deliver_strategy(&self, value: &UnableToDeliverStrategy) -> Self {
-        let _guard = self.factory.lock();
-        match &self.value {
+        self.with_factory_lock(|| match &self.value {
             PortFactoryPublisherType::Ipc(v) => {
                 let this = unsafe { (*v.lock()).__internal_partial_clone() };
                 let this = this.unable_to_deliver_strategy(value.clone().into());
@@ -139,14 +235,13 @@ impl PortFactoryPublisher {
                 let this = this.unable_to_deliver_strategy(value.clone().into());
                 self.clone_local(this)
             }
-        }
+        })
     }
 
     /// Sets the maximum slice length that a user can allocate with
     /// `ActiveRequest::loan_slice()` or `ActiveRequest::loan_slice_uninit()`.
     pub fn __initial_max_slice_len(&self, value: usize) -> Self {
-        let _guard = self.factory.lock();
-        match &self.value {
+        self.with_factory_lock(|| match &self.value {
             PortFactoryPublisherType::Ipc(v) => {
                 let this = unsafe { (*v.lock()).__internal_partial_clone() };
                 let this = this.initial_max_slice_len(value);
@@ -157,7 +252,7 @@ impl PortFactoryPublisher {
                 let this = this.initial_max_slice_len(value);
                 self.clone_local(this)
             }
-        }
+        })
     }
 
     /// Defines the allocation strategy that is used when the provided
@@ -165,8 +260,7 @@ impl PortFactoryPublisher {
     /// acquires more than max slice len in `ActiveRequest::loan_slice()` or
     /// `ActiveRequest::loan_slice_uninit()`.
     pub fn __allocation_strategy(&self, value: &AllocationStrategy) -> Self {
-        let _guard = self.factory.lock();
-        match &self.value {
+        self.with_factory_lock(|| match &self.value {
             PortFactoryPublisherType::Ipc(v) => {
                 let this = unsafe { (*v.lock()).__internal_partial_clone() };
                 let this = this.allocation_strategy(value.clone().into());
@@ -177,13 +271,12 @@ impl PortFactoryPublisher {
                 let this = this.allocation_strategy(value.clone().into());
                 self.clone_local(this)
             }
-        }
+        })
     }
 
     /// Creates a new `Publisher` or emits a `PublisherCreateError` on failure.
     pub fn create(&self) -> PyResult<Publisher> {
-        let _guard = self.factory.lock();
-        match &self.value {
+        self.with_factory_lock(|| match &self.value {
             PortFactoryPublisherType::Ipc(v) => {
                 let this = unsafe { (*v.lock()).__internal_partial_clone() };
                 Ok(Publisher {
@@ -206,6 +299,6 @@ impl PortFactoryPublisher {
                     user_header_type_details: self.user_header_type_details.clone(),
                 })
             }
-        }
+        })
     }
 }

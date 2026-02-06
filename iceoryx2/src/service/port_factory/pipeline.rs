@@ -32,6 +32,8 @@ use crate::sample_mut::SampleMut;
 use crate::service::attribute::AttributeSet;
 use crate::service::dynamic_config::publish_subscribe::{PublisherDetails, SubscriberDetails};
 use crate::service::port_factory::publish_subscribe;
+use crate::service::port_factory::publisher::PortFactoryPublisher;
+use crate::service::port_factory::subscriber::PortFactorySubscriber;
 use crate::service::port_factory::{nodes, PortFactory as _};
 use crate::service::service_id::ServiceId;
 use crate::service::service_name::ServiceName;
@@ -185,6 +187,44 @@ impl<
         self.edges[self.number_of_stages]
             .dynamic_config()
             .list_subscribers(callback);
+    }
+
+    #[doc(hidden)]
+    pub fn __internal_ingress_publisher_builder(
+        &self,
+    ) -> PortFactoryPublisher<'_, ServiceType, Payload, UserHeader> {
+        self.edges[0].publisher_builder()
+    }
+
+    #[doc(hidden)]
+    pub fn __internal_worker_subscriber_builder(
+        &self,
+        stage_id: usize,
+    ) -> Option<PortFactorySubscriber<'_, ServiceType, Payload, UserHeader>> {
+        if stage_id >= self.number_of_stages {
+            return None;
+        }
+
+        Some(self.edges[stage_id].subscriber_builder())
+    }
+
+    #[doc(hidden)]
+    pub fn __internal_worker_publisher_builder(
+        &self,
+        stage_id: usize,
+    ) -> Option<PortFactoryPublisher<'_, ServiceType, Payload, UserHeader>> {
+        if stage_id >= self.number_of_stages {
+            return None;
+        }
+
+        Some(self.edges[stage_id + 1].publisher_builder())
+    }
+
+    #[doc(hidden)]
+    pub fn __internal_egress_subscriber_builder(
+        &self,
+    ) -> PortFactorySubscriber<'_, ServiceType, Payload, UserHeader> {
+        self.edges[self.number_of_stages].subscriber_builder()
     }
 }
 

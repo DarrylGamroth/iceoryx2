@@ -79,13 +79,15 @@ impl ServiceBuilder {
             ServiceBuilderType::Ipc(v) => {
                 let this = v.clone();
                 ServiceBuilderPipeline::new(ServiceBuilderPipelineType::Ipc(
-                    this.pipeline::<[CustomPayloadMarker]>(),
+                    this.pipeline::<[CustomPayloadMarker]>()
+                        .user_header::<CustomHeaderMarker>(),
                 ))
             }
             ServiceBuilderType::Local(v) => {
                 let this = v.clone();
                 ServiceBuilderPipeline::new(ServiceBuilderPipelineType::Local(
-                    this.pipeline::<[CustomPayloadMarker]>(),
+                    this.pipeline::<[CustomPayloadMarker]>()
+                        .user_header::<CustomHeaderMarker>(),
                 ))
             }
         }

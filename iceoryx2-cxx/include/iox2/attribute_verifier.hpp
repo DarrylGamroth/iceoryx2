@@ -59,7 +59,7 @@ class AttributeVerifier {
     friend class ServiceBuilderRequestResponse;
     template <typename, ServiceType>
     friend class ServiceBuilderBlackboardOpener;
-    template <typename, ServiceType>
+    template <typename, typename, ServiceType>
     friend class ServiceBuilderPipeline;
 
     void drop();

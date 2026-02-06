@@ -139,6 +139,8 @@ fn static_config_messaging_pattern_to_python(
         iceoryx2::service::static_config::messaging_pattern::MessagingPattern::Pipeline(_) => {
             MessagingPattern::Pipeline
         }
-        _ => fatal_panic!(from "ServiceDetails::messaging_pattern()", "Unknown messaging pattern in translation." ),
+        _ => {
+            fatal_panic!(from "ServiceDetails::messaging_pattern()", "Unknown messaging pattern in translation." )
+        }
     }
 }

@@ -48,6 +48,8 @@ class PortFactorySubscriber {
   private:
     template <ServiceType, typename, typename>
     friend class PortFactoryPublishSubscribe;
+    template <ServiceType, typename, typename>
+    friend class PortFactoryPipeline;
 
     explicit PortFactorySubscriber(iox2_port_factory_subscriber_builder_h handle);
 

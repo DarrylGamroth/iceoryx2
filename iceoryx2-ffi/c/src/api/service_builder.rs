@@ -14,6 +14,7 @@
 
 use crate::api::{iox2_service_type_e, AssertNonNullHandle, HandleToType};
 use crate::{
+    iox2_service_builder_pipeline_set_user_header_type_details,
     iox2_service_builder_pub_sub_set_user_header_type_details,
     iox2_service_builder_request_response_set_request_header_type_details,
     iox2_service_builder_request_response_set_response_header_type_details, iox2_type_variant_e,
@@ -45,7 +46,7 @@ pub(super) union ServiceBuilderUnionNested<S: Service> {
     pub(super) base: ManuallyDrop<ServiceBuilderBase<S>>,
     pub(super) event: ManuallyDrop<ServiceBuilderEvent<S>>,
     pub(super) pub_sub: ManuallyDrop<ServiceBuilderPubSub<PayloadFfi, UserHeaderFfi, S>>,
-    pub(super) pipeline: ManuallyDrop<ServiceBuilderPipeline<PayloadFfi, S>>,
+    pub(super) pipeline: ManuallyDrop<ServiceBuilderPipeline<PayloadFfi, S, UserHeaderFfi>>,
     pub(super) request_response: ManuallyDrop<
         ServiceBuilderRequestResponse<PayloadFfi, UserHeaderFfi, PayloadFfi, UserHeaderFfi, S>,
     >,
@@ -86,7 +87,7 @@ impl ServiceBuilderUnion {
     }
 
     pub(super) fn new_ipc_pipeline(
-        service_builder: ServiceBuilderPipeline<PayloadFfi, crate::IpcService>,
+        service_builder: ServiceBuilderPipeline<PayloadFfi, crate::IpcService, UserHeaderFfi>,
     ) -> Self {
         Self {
             ipc: ManuallyDrop::new(ServiceBuilderUnionNested::<crate::IpcService> {
@@ -160,7 +161,7 @@ impl ServiceBuilderUnion {
     }
 
     pub(super) fn new_local_pipeline(
-        service_builder: ServiceBuilderPipeline<PayloadFfi, crate::LocalService>,
+        service_builder: ServiceBuilderPipeline<PayloadFfi, crate::LocalService, UserHeaderFfi>,
     ) -> Self {
         Self {
             local: ManuallyDrop::new(ServiceBuilderUnionNested::<crate::LocalService> {
@@ -610,7 +611,9 @@ pub unsafe extern "C" fn iox2_service_builder_pipeline(
 
             let service_builder = ManuallyDrop::into_inner(service_builder.base);
             service_builders_struct.set(ServiceBuilderUnion::new_ipc_pipeline(
-                service_builder.pipeline::<PayloadFfi>(),
+                service_builder
+                    .pipeline::<PayloadFfi>()
+                    .user_header::<UserHeaderFfi>(),
             ));
         }
         iox2_service_type_e::LOCAL => {
@@ -619,10 +622,23 @@ pub unsafe extern "C" fn iox2_service_builder_pipeline(
 
             let service_builder = ManuallyDrop::into_inner(service_builder.base);
             service_builders_struct.set(ServiceBuilderUnion::new_local_pipeline(
-                service_builder.pipeline::<PayloadFfi>(),
+                service_builder
+                    .pipeline::<PayloadFfi>()
+                    .user_header::<UserHeaderFfi>(),
             ));
         }
     }
+
+    // set default user header type to ()
+    let user_header_type_name = "()";
+    iox2_service_builder_pipeline_set_user_header_type_details(
+        &(service_builder_handle as *mut _ as _),
+        iox2_type_variant_e::FIXED_SIZE,
+        user_header_type_name.as_ptr() as *const core::ffi::c_char,
+        user_header_type_name.len(),
+        0,
+        1,
+    );
 
     service_builder_handle as *mut _ as _
 }

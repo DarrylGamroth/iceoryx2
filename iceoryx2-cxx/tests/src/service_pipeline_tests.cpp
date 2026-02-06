@@ -21,6 +21,14 @@
 namespace {
 using namespace iox2;
 
+struct HeaderA {
+    uint64_t value { 0 };
+};
+
+struct HeaderB {
+    uint32_t value { 0 };
+};
+
 template <typename T>
 class ServicePipelineTest : public ::testing::Test {
   public:
@@ -82,7 +90,7 @@ TYPED_TEST(ServicePipelineTest, open_or_create_service_does_exist) {
                      .value());
     {
         auto sut =
-            bb::Optional<PortFactoryPipeline<SERVICE_TYPE, uint64_t>>(node.service_builder(service_name)
+            bb::Optional<PortFactoryPipeline<SERVICE_TYPE, uint64_t, void>>(node.service_builder(service_name)
                                                                           .template pipeline<uint64_t>()
                                                                           .open_or_create()
                                                                           .value());
@@ -91,7 +99,7 @@ TYPED_TEST(ServicePipelineTest, open_or_create_service_does_exist) {
                 .value());
 
         auto sut_2 =
-            bb::Optional<PortFactoryPipeline<SERVICE_TYPE, uint64_t>>(node.service_builder(service_name)
+            bb::Optional<PortFactoryPipeline<SERVICE_TYPE, uint64_t, void>>(node.service_builder(service_name)
                                                                           .template pipeline<uint64_t>()
                                                                           .open_or_create()
                                                                           .value());
@@ -144,6 +152,25 @@ TYPED_TEST(ServicePipelineTest, opening_existing_service_with_wrong_payload_type
     ASSERT_THAT(sut.error(), Eq(PipelineOpenError::IncompatiblePayloadType));
 }
 
+TYPED_TEST(ServicePipelineTest, opening_existing_service_with_wrong_user_header_type_fails) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+
+    const auto service_name = iox2_testing::generate_service_name();
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto sut_create = node.service_builder(service_name)
+                          .template pipeline<uint64_t>()
+                          .template user_header<HeaderA>()
+                          .create()
+                          .value();
+    auto sut = node.service_builder(service_name)
+                   .template pipeline<uint64_t>()
+                   .template user_header<HeaderB>()
+                   .open();
+
+    ASSERT_FALSE(sut.has_value());
+    ASSERT_THAT(sut.error(), Eq(PipelineOpenError::IncompatibleUserHeaderType));
+}
+
 TYPED_TEST(ServicePipelineTest, service_builder_configuration_works) {
     constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
     constexpr uint64_t NUMBER_OF_STAGES = 3U;
@@ -175,6 +202,65 @@ TYPED_TEST(ServicePipelineTest, service_builder_configuration_works) {
     ASSERT_THAT(sut.number_of_workers(0).value(), Eq(0));
     ASSERT_THAT(sut.number_of_workers(NUMBER_OF_STAGES).has_value(), Eq(false));
     ASSERT_THAT(sut.number_of_egress_ports(), Eq(0));
+}
+
+TYPED_TEST(ServicePipelineTest, runtime_role_builders_and_dynamic_lists_work) {
+    constexpr ServiceType SERVICE_TYPE = TestFixture::TYPE;
+
+    const auto service_name = iox2_testing::generate_service_name();
+    auto node = NodeBuilder().create<SERVICE_TYPE>().value();
+    auto sut = node.service_builder(service_name)
+                   .template pipeline<uint64_t>()
+                   .number_of_stages(1)
+                   .max_in_flight_samples(8)
+                   .create()
+                   .value();
+
+    auto ingress = sut.ingress_builder().create().value();
+    auto worker_subscriber = sut.worker_subscriber_builder(0).value().create().value();
+    auto worker_publisher = sut.worker_publisher_builder(0).value().create().value();
+    auto egress = sut.egress_builder().create().value();
+
+    ASSERT_THAT(sut.worker_subscriber_builder(1).has_value(), Eq(false));
+    ASSERT_THAT(sut.worker_publisher_builder(1).has_value(), Eq(false));
+
+    ASSERT_THAT(sut.number_of_ingress_ports(), Eq(1));
+    ASSERT_THAT(sut.number_of_workers(0).value(), Eq(1));
+    ASSERT_THAT(sut.number_of_egress_ports(), Eq(1));
+
+    uint64_t ingress_count = 0;
+    sut.list_ingresses([&](auto) {
+        ++ingress_count;
+        return CallbackProgression::Continue;
+    });
+    ASSERT_THAT(ingress_count, Eq(1));
+
+    uint64_t worker_count = 0;
+    sut.list_workers(0, [&](auto) {
+        ++worker_count;
+        return CallbackProgression::Continue;
+    });
+    ASSERT_THAT(worker_count, Eq(1));
+
+    uint64_t egress_count = 0;
+    sut.list_egresses([&](auto) {
+        ++egress_count;
+        return CallbackProgression::Continue;
+    });
+    ASSERT_THAT(egress_count, Eq(1));
+
+    ingress.update_connections().value();
+    worker_publisher.update_connections().value();
+
+    ingress.send_copy(11).value();
+    auto work = worker_subscriber.receive().value();
+    ASSERT_THAT(work.has_value(), Eq(true));
+    ASSERT_THAT(work->payload(), Eq(11));
+
+    worker_publisher.send_copy(22).value();
+    auto final_sample = egress.receive().value();
+    ASSERT_THAT(final_sample.has_value(), Eq(true));
+    ASSERT_THAT(final_sample->payload(), Eq(22));
 }
 
 TYPED_TEST(ServicePipelineTest, open_or_create_with_attributes_works) {

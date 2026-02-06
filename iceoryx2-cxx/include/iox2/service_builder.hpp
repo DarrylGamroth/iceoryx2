@@ -49,7 +49,7 @@ class ServiceBuilder {
     /// Create a new builder to create a
     /// [`MessagingPattern::Pipeline`] [`Service`].
     template <typename Payload>
-    auto pipeline() && -> ServiceBuilderPipeline<Payload, S>;
+    auto pipeline() && -> ServiceBuilderPipeline<Payload, void, S>;
 
     /// Create a new builder to create a
     /// [`MessagingPattern::Blackboard`] [`Service`].
@@ -94,8 +94,8 @@ inline auto ServiceBuilder<
 
 template <ServiceType S>
 template <typename Payload>
-inline auto ServiceBuilder<S>::pipeline() && -> ServiceBuilderPipeline<Payload, S> {
-    return ServiceBuilderPipeline<Payload, S> { m_handle };
+inline auto ServiceBuilder<S>::pipeline() && -> ServiceBuilderPipeline<Payload, void, S> {
+    return ServiceBuilderPipeline<Payload, void, S> { m_handle };
 }
 
 template <ServiceType S>

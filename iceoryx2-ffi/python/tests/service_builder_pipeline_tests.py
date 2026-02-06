@@ -22,6 +22,14 @@ class Payload(ctypes.Structure):
     _fields_ = [("data", ctypes.c_ubyte)]
 
 
+class HeaderA(ctypes.Structure):
+    _fields_ = [("stage", ctypes.c_ubyte)]
+
+
+class HeaderB(ctypes.Structure):
+    _fields_ = [("stage", ctypes.c_uint)]
+
+
 @pytest.mark.parametrize("service_type", service_types)
 def test_non_existing_service_can_be_created(service_type: iox2.ServiceType) -> None:
     config = iox2.testing.generate_isolated_config()
@@ -122,3 +130,83 @@ def test_open_or_create_service_with_attributes_work(
 
     assert sut_create.attributes == attribute_spec.attributes
     assert sut_open.attributes == attribute_spec.attributes
+
+
+@pytest.mark.parametrize("service_type", service_types)
+def test_opening_existing_service_with_wrong_user_header_type_fails(
+    service_type: iox2.ServiceType,
+) -> None:
+    config = iox2.testing.generate_isolated_config()
+    node = iox2.NodeBuilder.new().config(config).create(service_type)
+
+    service_name = iox2.testing.generate_service_name()
+    _existing = (
+        node.service_builder(service_name)
+        .pipeline(Payload)
+        .user_header(HeaderA)
+        .create()
+    )
+
+    with pytest.raises(iox2.PipelineOpenError, match="IncompatibleUserHeaderType"):
+        node.service_builder(service_name).pipeline(Payload).user_header(HeaderB).open()
+
+
+@pytest.mark.parametrize("service_type", service_types)
+def test_runtime_role_builders_and_dynamic_lists_work(
+    service_type: iox2.ServiceType,
+) -> None:
+    config = iox2.testing.generate_isolated_config()
+    node = iox2.NodeBuilder.new().config(config).create(service_type)
+
+    service_name = iox2.testing.generate_service_name()
+    sut = (
+        node.service_builder(service_name)
+        .pipeline(Payload)
+        .number_of_stages(1)
+        .max_in_flight_samples(4)
+        .create()
+    )
+
+    ingress_builder = sut.ingress_builder()
+    worker_sub_builder = sut.worker_subscriber_builder(0)
+    worker_pub_builder = sut.worker_publisher_builder(0)
+    egress_builder = sut.egress_builder()
+
+    assert worker_sub_builder is not None
+    assert worker_pub_builder is not None
+    assert sut.worker_subscriber_builder(1) is None
+    assert sut.worker_publisher_builder(1) is None
+    assert sut.number_of_workers(1) is None
+
+    ingress = ingress_builder.create()
+    worker_sub = worker_sub_builder.create()
+    worker_pub = worker_pub_builder.create()
+    egress = egress_builder.create()
+
+    assert sut.number_of_ingress_ports() == 1
+    assert sut.number_of_workers(0) == 1
+    assert sut.number_of_egress_ports() == 1
+    assert len(sut.list_ingresses()) == 1
+    assert len(sut.list_workers(0)) == 1
+    assert sut.list_workers(1) is None
+    assert len(sut.list_egresses()) == 1
+
+    ingress.send_copy(Payload(7))
+
+    worker_sample = None
+    for _ in range(10_000):
+        worker_sample = worker_sub.receive()
+        if worker_sample is not None:
+            break
+
+    assert worker_sample is not None
+    worker_pub.send_copy(Payload(worker_sample.payload().contents.data + 1))
+
+    egress_sample = None
+    for _ in range(10_000):
+        egress_sample = egress.receive()
+        if egress_sample is not None:
+            break
+
+    assert egress_sample is not None
+    assert egress_sample.payload().contents.data == 8

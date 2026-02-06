@@ -10,22 +10,26 @@
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use iceoryx2::service::builder::CustomPayloadMarker;
+use iceoryx2::service::builder::{CustomHeaderMarker, CustomPayloadMarker};
 use pyo3::prelude::*;
 
 use crate::attribute_specifier::AttributeSpecifier;
 use crate::attribute_verifier::AttributeVerifier;
-use crate::error::{
-    PipelineCreateError, PipelineOpenError, PipelineOpenOrCreateError,
-};
+use crate::error::{PipelineCreateError, PipelineOpenError, PipelineOpenOrCreateError};
 use crate::port_factory_pipeline::{PortFactoryPipeline, PortFactoryPipelineType};
 use crate::type_detail::TypeDetail;
 use crate::type_storage::TypeStorage;
 
-type IpcBuilder =
-    iceoryx2::service::builder::pipeline::Builder<[CustomPayloadMarker], crate::IpcService>;
-type LocalBuilder =
-    iceoryx2::service::builder::pipeline::Builder<[CustomPayloadMarker], crate::LocalService>;
+type IpcBuilder = iceoryx2::service::builder::pipeline::Builder<
+    [CustomPayloadMarker],
+    crate::IpcService,
+    CustomHeaderMarker,
+>;
+type LocalBuilder = iceoryx2::service::builder::pipeline::Builder<
+    [CustomPayloadMarker],
+    crate::LocalService,
+    CustomHeaderMarker,
+>;
 
 #[derive(Clone)]
 pub(crate) enum ServiceBuilderPipelineType {
@@ -38,6 +42,7 @@ pub(crate) enum ServiceBuilderPipelineType {
 pub struct ServiceBuilderPipeline {
     pub(crate) value: ServiceBuilderPipelineType,
     pub payload_type_details: TypeStorage,
+    pub user_header_type_details: TypeStorage,
 }
 
 impl ServiceBuilderPipeline {
@@ -45,6 +50,7 @@ impl ServiceBuilderPipeline {
         Self {
             value,
             payload_type_details: TypeStorage::new(),
+            user_header_type_details: TypeStorage::new(),
         }
     }
 
@@ -52,6 +58,7 @@ impl ServiceBuilderPipeline {
         Self {
             value: ServiceBuilderPipelineType::Ipc(builder),
             payload_type_details: self.payload_type_details.clone(),
+            user_header_type_details: self.user_header_type_details.clone(),
         }
     }
 
@@ -59,6 +66,7 @@ impl ServiceBuilderPipeline {
         Self {
             value: ServiceBuilderPipelineType::Local(builder),
             payload_type_details: self.payload_type_details.clone(),
+            user_header_type_details: self.user_header_type_details.clone(),
         }
     }
 }
@@ -67,6 +75,10 @@ impl ServiceBuilderPipeline {
 impl ServiceBuilderPipeline {
     pub fn __set_payload_type(&mut self, value: PyObject) {
         self.payload_type_details.value = Some(value)
+    }
+
+    pub fn __set_user_header_type(&mut self, value: PyObject) {
+        self.user_header_type_details.value = Some(value)
     }
 
     /// Defines the payload type details.
@@ -80,6 +92,22 @@ impl ServiceBuilderPipeline {
             ServiceBuilderPipelineType::Local(v) => {
                 let this = v.clone();
                 let this = unsafe { this.__internal_set_payload_type_details(&value.0) };
+                self.clone_local(this)
+            }
+        }
+    }
+
+    /// Defines the user header type details.
+    pub fn __user_header_type_details(&self, value: &TypeDetail) -> Self {
+        match &self.value {
+            ServiceBuilderPipelineType::Ipc(v) => {
+                let this = v.clone();
+                let this = unsafe { this.__internal_set_user_header_type_details(&value.0) };
+                self.clone_ipc(this)
+            }
+            ServiceBuilderPipelineType::Local(v) => {
+                let this = v.clone();
+                let this = unsafe { this.__internal_set_user_header_type_details(&value.0) };
                 self.clone_local(this)
             }
         }
@@ -137,6 +165,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineOpenOrCreateError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
             ServiceBuilderPipelineType::Local(v) => Ok(PortFactoryPipeline::new(
                 PortFactoryPipelineType::Local(
@@ -145,6 +174,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineOpenOrCreateError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
         }
     }
@@ -163,6 +193,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineOpenOrCreateError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
             ServiceBuilderPipelineType::Local(v) => Ok(PortFactoryPipeline::new(
                 PortFactoryPipelineType::Local(
@@ -171,6 +202,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineOpenOrCreateError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
         }
     }
@@ -185,6 +217,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineOpenError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
             ServiceBuilderPipelineType::Local(v) => Ok(PortFactoryPipeline::new(
                 PortFactoryPipelineType::Local(
@@ -193,12 +226,16 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineOpenError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
         }
     }
 
     /// Opens an existing `Service` with attribute requirements.
-    pub fn open_with_attributes(&self, verifier: &AttributeVerifier) -> PyResult<PortFactoryPipeline> {
+    pub fn open_with_attributes(
+        &self,
+        verifier: &AttributeVerifier,
+    ) -> PyResult<PortFactoryPipeline> {
         match &self.value {
             ServiceBuilderPipelineType::Ipc(v) => Ok(PortFactoryPipeline::new(
                 PortFactoryPipelineType::Ipc(
@@ -207,6 +244,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineOpenError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
             ServiceBuilderPipelineType::Local(v) => Ok(PortFactoryPipeline::new(
                 PortFactoryPipelineType::Local(
@@ -215,6 +253,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineOpenError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
         }
     }
@@ -229,6 +268,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineCreateError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
             ServiceBuilderPipelineType::Local(v) => Ok(PortFactoryPipeline::new(
                 PortFactoryPipelineType::Local(
@@ -237,6 +277,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineCreateError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
         }
     }
@@ -254,6 +295,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineCreateError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
             ServiceBuilderPipelineType::Local(v) => Ok(PortFactoryPipeline::new(
                 PortFactoryPipelineType::Local(
@@ -262,6 +304,7 @@ impl ServiceBuilderPipeline {
                         .map_err(|e| PipelineCreateError::new_err(format!("{e:?}")))?,
                 ),
                 self.payload_type_details.clone(),
+                self.user_header_type_details.clone(),
             )),
         }
     }

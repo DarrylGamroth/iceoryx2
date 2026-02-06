@@ -76,6 +76,8 @@ pub enum PipelineOpenError {
     IncompatibleAttributes,
     /// The payload type of the existing [`Service`] is not compatible.
     IncompatiblePayloadType,
+    /// The user header type of the existing [`Service`] is not compatible.
+    IncompatibleUserHeaderType,
     /// The [`Service`] creation timeout has passed and it is still not initialized.
     HangsInCreation,
     /// The [`Service`] supports fewer [`Node`](crate::node::Node)s than requested.
@@ -383,7 +385,7 @@ impl<
             || requested_user_header.size() != existing_user_header.size()
             || requested_user_header.alignment() > existing_user_header.alignment()
         {
-            fail!(from self, with PipelineOpenError::IncompatiblePayloadType,
+            fail!(from self, with PipelineOpenError::IncompatibleUserHeaderType,
                 "Unable to open pipeline service since the service offers the user header type \"{:?}\" which is not compatible to the requested user header type \"{:?}\".",
                 existing_user_header, requested_user_header);
         }

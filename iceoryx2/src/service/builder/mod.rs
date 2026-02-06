@@ -228,7 +228,10 @@ impl<S: Service> Builder<S> {
         self,
     ) -> pipeline::Builder<PayloadType, S> {
         BuilderWithServiceType::new(
-            StaticConfig::new_pipeline::<S::ServiceNameHasher>(&self.name, self.shared_node.config()),
+            StaticConfig::new_pipeline::<S::ServiceNameHasher>(
+                &self.name,
+                self.shared_node.config(),
+            ),
             self.shared_node,
         )
         .pipeline()

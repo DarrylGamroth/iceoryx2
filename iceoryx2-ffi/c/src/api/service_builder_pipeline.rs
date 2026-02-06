@@ -16,7 +16,7 @@ use crate::api::{
     c_size_t, iox2_port_factory_pipeline_h, iox2_port_factory_pipeline_t,
     iox2_service_builder_pipeline_h, iox2_service_builder_pipeline_h_ref, iox2_service_type_e,
     iox2_type_variant_e, AssertNonNullHandle, HandleToType, IntoCInt, PayloadFfi,
-    PortFactoryPipelineUnion, ServiceBuilderUnion, IOX2_OK,
+    PortFactoryPipelineUnion, ServiceBuilderUnion, UserHeaderFfi, IOX2_OK,
 };
 use crate::create_type_details;
 
@@ -47,6 +47,8 @@ pub enum iox2_pipeline_open_or_create_error_e {
     O_INCOMPATIBLE_ATTRIBUTES,
     #[CStr = "incompatible payload type"]
     O_INCOMPATIBLE_PAYLOAD_TYPE,
+    #[CStr = "incompatible user header type"]
+    O_INCOMPATIBLE_USER_HEADER_TYPE,
     #[CStr = "hangs in creation"]
     O_HANGS_IN_CREATION,
     #[CStr = "does not support requested amount of nodes"]
@@ -105,6 +107,9 @@ impl IntoCInt for PipelineOpenError {
             }
             PipelineOpenError::IncompatiblePayloadType => {
                 iox2_pipeline_open_or_create_error_e::O_INCOMPATIBLE_PAYLOAD_TYPE
+            }
+            PipelineOpenError::IncompatibleUserHeaderType => {
+                iox2_pipeline_open_or_create_error_e::O_INCOMPATIBLE_USER_HEADER_TYPE
             }
             PipelineOpenError::HangsInCreation => {
                 iox2_pipeline_open_or_create_error_e::O_HANGS_IN_CREATION
@@ -211,17 +216,61 @@ pub unsafe extern "C" fn iox2_service_builder_pipeline_set_payload_type_details(
 
     match service_builder_struct.service_type {
         iox2_service_type_e::IPC => {
-            let service_builder = ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
             let service_builder = ManuallyDrop::into_inner(service_builder.pipeline);
             service_builder_struct.set(ServiceBuilderUnion::new_ipc_pipeline(
                 service_builder.__internal_set_payload_type_details(&value),
             ));
         }
         iox2_service_type_e::LOCAL => {
-            let service_builder = ManuallyDrop::take(&mut service_builder_struct.value.as_mut().local);
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().local);
             let service_builder = ManuallyDrop::into_inner(service_builder.pipeline);
             service_builder_struct.set(ServiceBuilderUnion::new_local_pipeline(
                 service_builder.__internal_set_payload_type_details(&value),
+            ));
+        }
+    }
+
+    IOX2_OK
+}
+
+/// Sets the user header type details for the pipeline builder.
+#[no_mangle]
+pub unsafe extern "C" fn iox2_service_builder_pipeline_set_user_header_type_details(
+    service_builder_handle: iox2_service_builder_pipeline_h_ref,
+    type_variant: iox2_type_variant_e,
+    type_name_str: *const c_char,
+    type_name_len: c_size_t,
+    size: c_size_t,
+    alignment: c_size_t,
+) -> c_int {
+    service_builder_handle.assert_non_null();
+
+    let value =
+        match create_type_details(type_variant, type_name_str, type_name_len, size, alignment) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+
+    let service_builder_struct = unsafe { &mut *service_builder_handle.as_type() };
+
+    match service_builder_struct.service_type {
+        iox2_service_type_e::IPC => {
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+            let service_builder = ManuallyDrop::into_inner(service_builder.pipeline);
+            service_builder_struct.set(ServiceBuilderUnion::new_ipc_pipeline(
+                service_builder.__internal_set_user_header_type_details(&value),
+            ));
+        }
+        iox2_service_type_e::LOCAL => {
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().local);
+            let service_builder = ManuallyDrop::into_inner(service_builder.pipeline);
+            service_builder_struct.set(ServiceBuilderUnion::new_local_pipeline(
+                service_builder.__internal_set_user_header_type_details(&value),
             ));
         }
     }
@@ -240,10 +289,12 @@ pub unsafe extern "C" fn iox2_service_builder_pipeline_set_number_of_stages(
 
     match service_builder_struct.service_type {
         iox2_service_type_e::IPC => {
-            let service_builder = ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
             let service_builder = ManuallyDrop::into_inner(service_builder.pipeline);
-            service_builder_struct
-                .set(ServiceBuilderUnion::new_ipc_pipeline(service_builder.number_of_stages(value)));
+            service_builder_struct.set(ServiceBuilderUnion::new_ipc_pipeline(
+                service_builder.number_of_stages(value),
+            ));
         }
         iox2_service_type_e::LOCAL => {
             let service_builder =
@@ -267,7 +318,8 @@ pub unsafe extern "C" fn iox2_service_builder_pipeline_set_max_in_flight_samples
 
     match service_builder_struct.service_type {
         iox2_service_type_e::IPC => {
-            let service_builder = ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
             let service_builder = ManuallyDrop::into_inner(service_builder.pipeline);
             service_builder_struct.set(ServiceBuilderUnion::new_ipc_pipeline(
                 service_builder.max_in_flight_samples(value),
@@ -295,17 +347,20 @@ pub unsafe extern "C" fn iox2_service_builder_pipeline_set_max_nodes(
 
     match service_builder_struct.service_type {
         iox2_service_type_e::IPC => {
-            let service_builder = ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
             let service_builder = ManuallyDrop::into_inner(service_builder.pipeline);
-            service_builder_struct
-                .set(ServiceBuilderUnion::new_ipc_pipeline(service_builder.max_nodes(value)));
+            service_builder_struct.set(ServiceBuilderUnion::new_ipc_pipeline(
+                service_builder.max_nodes(value),
+            ));
         }
         iox2_service_type_e::LOCAL => {
             let service_builder =
                 ManuallyDrop::take(&mut service_builder_struct.value.as_mut().local);
             let service_builder = ManuallyDrop::into_inner(service_builder.pipeline);
-            service_builder_struct
-                .set(ServiceBuilderUnion::new_local_pipeline(service_builder.max_nodes(value)));
+            service_builder_struct.set(ServiceBuilderUnion::new_local_pipeline(
+                service_builder.max_nodes(value),
+            ));
         }
     }
 }
@@ -321,7 +376,8 @@ pub unsafe extern "C" fn iox2_service_builder_pipeline_set_initial_max_slice_len
 
     match service_builder_struct.service_type {
         iox2_service_type_e::IPC => {
-            let service_builder = ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+            let service_builder =
+                ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
             let service_builder = ManuallyDrop::into_inner(service_builder.pipeline);
             service_builder_struct.set(ServiceBuilderUnion::new_ipc_pipeline(
                 service_builder.initial_max_slice_len(value),
@@ -451,11 +507,12 @@ unsafe fn iox2_service_builder_pipeline_open_create_impl<E: IntoCInt>(
     port_factory_struct_ptr: *mut iox2_port_factory_pipeline_t,
     port_factory_handle_ptr: *mut iox2_port_factory_pipeline_h,
     func_ipc: impl FnOnce(
-        Builder<PayloadFfi, crate::IpcService>,
-    ) -> Result<PortFactory<crate::IpcService, PayloadFfi>, E>,
+        Builder<PayloadFfi, crate::IpcService, UserHeaderFfi>,
+    ) -> Result<PortFactory<crate::IpcService, PayloadFfi, UserHeaderFfi>, E>,
     func_local: impl FnOnce(
-        Builder<PayloadFfi, crate::LocalService>,
-    ) -> Result<PortFactory<crate::LocalService, PayloadFfi>, E>,
+        Builder<PayloadFfi, crate::LocalService, UserHeaderFfi>,
+    )
+        -> Result<PortFactory<crate::LocalService, PayloadFfi, UserHeaderFfi>, E>,
 ) -> c_int {
     service_builder_handle.assert_non_null();
     debug_assert!(!port_factory_handle_ptr.is_null());

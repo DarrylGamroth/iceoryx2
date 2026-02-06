@@ -36,7 +36,7 @@ class ServiceId {
     friend class PortFactoryRequestResponse;
     template <ServiceType, typename>
     friend class PortFactoryBlackboard;
-    template <ServiceType, typename>
+    template <ServiceType, typename, typename>
     friend class PortFactoryPipeline;
 
     iox2::bb::StaticString<IOX2_SERVICE_ID_LENGTH> m_value;

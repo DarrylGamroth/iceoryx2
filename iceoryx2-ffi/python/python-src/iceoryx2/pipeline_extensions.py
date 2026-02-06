@@ -49,7 +49,28 @@ def pipeline(self: ServiceBuilder, t: Type[T]) -> ServiceBuilderPipeline:
         .type_name(TypeName.new(type_name))
         .size(type_size)
         .alignment(type_align)
+    ).__user_header_type_details(
+        TypeDetail.new()
+        .type_variant(TypeVariant.FixedSize)
+        .type_name(TypeName.new("()"))
+        .size(0)
+        .alignment(1)
     )
 
 
+def set_user_header(self: ServiceBuilderPipeline, t: Type[T]) -> ServiceBuilderPipeline:
+    """Sets the user header type for the service."""
+    type_name = get_type_name(t)
+    result = self.__user_header_type_details(
+        TypeDetail.new()
+        .type_variant(TypeVariant.FixedSize)
+        .type_name(TypeName.new(type_name))
+        .size(ctypes.sizeof(t))
+        .alignment(ctypes.alignment(t))
+    )
+    result.__set_user_header_type(t)
+    return result
+
+
 ServiceBuilder.pipeline = pipeline
+ServiceBuilderPipeline.user_header = set_user_header

@@ -14,12 +14,16 @@
 
 use crate::{
     api::{
-        iox2_service_type_e, iox2_static_config_pipeline_t, AssertNonNullHandle, HandleToType,
-        IntoCInt, PayloadFfi,
+        iox2_callback_progression_e, iox2_port_factory_publisher_builder_h,
+        iox2_port_factory_publisher_builder_t, iox2_port_factory_subscriber_builder_h,
+        iox2_port_factory_subscriber_builder_t, iox2_service_type_e, iox2_static_config_pipeline_t,
+        iox2_subscriber_details_ptr, AssertNonNullHandle, HandleToType, IntoCInt, PayloadFfi,
+        PortFactoryPublisherBuilderUnion, PortFactorySubscriberBuilderUnion, UserHeaderFfi,
     },
     iox2_node_list_impl, IOX2_OK,
 };
 
+use iceoryx2::service::dynamic_config::publish_subscribe::{PublisherDetails, SubscriberDetails};
 use iceoryx2::service::port_factory::pipeline::PortFactory;
 use iceoryx2_bb_elementary::static_assert::*;
 use iceoryx2_ffi_macros::iceoryx2_ffi;
@@ -30,22 +34,27 @@ use core::{
 };
 
 use super::{
-    iox2_attribute_set_ptr, iox2_callback_context, iox2_node_list_callback, iox2_service_name_ptr,
+    iox2_attribute_set_ptr, iox2_callback_context, iox2_node_list_callback,
+    iox2_publisher_details_ptr, iox2_service_name_ptr,
 };
 
 pub(super) union PortFactoryPipelineUnion {
-    ipc: ManuallyDrop<PortFactory<crate::IpcService, PayloadFfi>>,
-    local: ManuallyDrop<PortFactory<crate::LocalService, PayloadFfi>>,
+    ipc: ManuallyDrop<PortFactory<crate::IpcService, PayloadFfi, UserHeaderFfi>>,
+    local: ManuallyDrop<PortFactory<crate::LocalService, PayloadFfi, UserHeaderFfi>>,
 }
 
 impl PortFactoryPipelineUnion {
-    pub(super) fn new_ipc(port_factory: PortFactory<crate::IpcService, PayloadFfi>) -> Self {
+    pub(super) fn new_ipc(
+        port_factory: PortFactory<crate::IpcService, PayloadFfi, UserHeaderFfi>,
+    ) -> Self {
         Self {
             ipc: ManuallyDrop::new(port_factory),
         }
     }
 
-    pub(super) fn new_local(port_factory: PortFactory<crate::LocalService, PayloadFfi>) -> Self {
+    pub(super) fn new_local(
+        port_factory: PortFactory<crate::LocalService, PayloadFfi, UserHeaderFfi>,
+    ) -> Self {
         Self {
             local: ManuallyDrop::new(port_factory),
         }
@@ -115,6 +124,22 @@ impl HandleToType for iox2_port_factory_pipeline_h_ref {
         unsafe { *self as *mut _ as _ }
     }
 }
+
+/// Callback used by [`iox2_port_factory_pipeline_dynamic_config_list_ingresses`].
+pub type iox2_list_pipeline_ingresses_callback =
+    extern "C" fn(iox2_callback_context, iox2_publisher_details_ptr) -> iox2_callback_progression_e;
+
+/// Callback used by [`iox2_port_factory_pipeline_dynamic_config_list_workers`].
+pub type iox2_list_pipeline_workers_callback = extern "C" fn(
+    iox2_callback_context,
+    iox2_subscriber_details_ptr,
+) -> iox2_callback_progression_e;
+
+/// Callback used by [`iox2_port_factory_pipeline_dynamic_config_list_egresses`].
+pub type iox2_list_pipeline_egresses_callback = extern "C" fn(
+    iox2_callback_context,
+    iox2_subscriber_details_ptr,
+) -> iox2_callback_progression_e;
 
 /// Returnes the service attributes.
 #[no_mangle]
@@ -195,7 +220,11 @@ pub unsafe extern "C" fn iox2_port_factory_pipeline_dynamic_config_number_of_wor
     let port_factory = &mut *handle.as_type();
     let value = match port_factory.service_type {
         iox2_service_type_e::IPC => port_factory.value.as_ref().ipc.number_of_workers(stage_id),
-        iox2_service_type_e::LOCAL => port_factory.value.as_ref().local.number_of_workers(stage_id),
+        iox2_service_type_e::LOCAL => port_factory
+            .value
+            .as_ref()
+            .local
+            .number_of_workers(stage_id),
     };
 
     if let Some(v) = value {
@@ -218,6 +247,298 @@ pub unsafe extern "C" fn iox2_port_factory_pipeline_dynamic_config_number_of_egr
         iox2_service_type_e::IPC => port_factory.value.as_ref().ipc.number_of_egress_ports(),
         iox2_service_type_e::LOCAL => port_factory.value.as_ref().local.number_of_egress_ports(),
     }
+}
+
+/// Calls the callback repeatedly for every connected ingress endpoint and provides all details
+/// with [`iox2_publisher_details_ptr`].
+#[no_mangle]
+pub unsafe extern "C" fn iox2_port_factory_pipeline_dynamic_config_list_ingresses(
+    handle: iox2_port_factory_pipeline_h_ref,
+    callback: iox2_list_pipeline_ingresses_callback,
+    callback_ctx: iox2_callback_context,
+) {
+    handle.assert_non_null();
+
+    let port_factory = &mut *handle.as_type();
+    let callback_tr = |details: &PublisherDetails| callback(callback_ctx, details).into();
+
+    match port_factory.service_type {
+        iox2_service_type_e::IPC => port_factory.value.as_ref().ipc.list_ingresses(callback_tr),
+        iox2_service_type_e::LOCAL => port_factory
+            .value
+            .as_ref()
+            .local
+            .list_ingresses(callback_tr),
+    };
+}
+
+/// Calls the callback repeatedly for every connected worker endpoint at `stage_id` and provides
+/// all details with [`iox2_subscriber_details_ptr`].
+#[no_mangle]
+pub unsafe extern "C" fn iox2_port_factory_pipeline_dynamic_config_list_workers(
+    handle: iox2_port_factory_pipeline_h_ref,
+    stage_id: usize,
+    callback: iox2_list_pipeline_workers_callback,
+    callback_ctx: iox2_callback_context,
+) {
+    handle.assert_non_null();
+
+    let port_factory = &mut *handle.as_type();
+    let mut callback_tr = |details: &SubscriberDetails| callback(callback_ctx, details).into();
+
+    match port_factory.service_type {
+        iox2_service_type_e::IPC => port_factory
+            .value
+            .as_ref()
+            .ipc
+            .list_workers(stage_id, &mut callback_tr),
+        iox2_service_type_e::LOCAL => port_factory
+            .value
+            .as_ref()
+            .local
+            .list_workers(stage_id, &mut callback_tr),
+    };
+}
+
+/// Calls the callback repeatedly for every connected egress endpoint and provides all details
+/// with [`iox2_subscriber_details_ptr`].
+#[no_mangle]
+pub unsafe extern "C" fn iox2_port_factory_pipeline_dynamic_config_list_egresses(
+    handle: iox2_port_factory_pipeline_h_ref,
+    callback: iox2_list_pipeline_egresses_callback,
+    callback_ctx: iox2_callback_context,
+) {
+    handle.assert_non_null();
+
+    let port_factory = &mut *handle.as_type();
+    let callback_tr = |details: &SubscriberDetails| callback(callback_ctx, details).into();
+
+    match port_factory.service_type {
+        iox2_service_type_e::IPC => port_factory.value.as_ref().ipc.list_egresses(callback_tr),
+        iox2_service_type_e::LOCAL => port_factory.value.as_ref().local.list_egresses(callback_tr),
+    };
+}
+
+/// Instantiates a [`iox2_port_factory_publisher_builder_h`] for ingress endpoints.
+#[no_mangle]
+pub unsafe extern "C" fn iox2_port_factory_pipeline_ingress_builder(
+    handle: iox2_port_factory_pipeline_h_ref,
+    publisher_builder_struct_ptr: *mut iox2_port_factory_publisher_builder_t,
+) -> iox2_port_factory_publisher_builder_h {
+    handle.assert_non_null();
+
+    let mut publisher_builder_struct_ptr = publisher_builder_struct_ptr;
+    fn no_op(_: *mut iox2_port_factory_publisher_builder_t) {}
+    let mut deleter: fn(*mut iox2_port_factory_publisher_builder_t) = no_op;
+    if publisher_builder_struct_ptr.is_null() {
+        publisher_builder_struct_ptr = iox2_port_factory_publisher_builder_t::alloc();
+        deleter = iox2_port_factory_publisher_builder_t::dealloc;
+    }
+    debug_assert!(!publisher_builder_struct_ptr.is_null());
+
+    let port_factory = &mut *handle.as_type();
+    match port_factory.service_type {
+        iox2_service_type_e::IPC => {
+            let publisher_builder = port_factory
+                .value
+                .as_ref()
+                .ipc
+                .__internal_ingress_publisher_builder();
+            (*publisher_builder_struct_ptr).init(
+                port_factory.service_type,
+                PortFactoryPublisherBuilderUnion::new_ipc(publisher_builder),
+                deleter,
+            );
+        }
+        iox2_service_type_e::LOCAL => {
+            let publisher_builder = port_factory
+                .value
+                .as_ref()
+                .local
+                .__internal_ingress_publisher_builder();
+            (*publisher_builder_struct_ptr).init(
+                port_factory.service_type,
+                PortFactoryPublisherBuilderUnion::new_local(publisher_builder),
+                deleter,
+            );
+        }
+    };
+
+    (*publisher_builder_struct_ptr).as_handle()
+}
+
+/// Instantiates a [`iox2_port_factory_subscriber_builder_h`] for worker input at `stage_id`.
+/// If `stage_id` is out of bounds it returns `NULL` and sets `*has_value` to `false`.
+#[no_mangle]
+pub unsafe extern "C" fn iox2_port_factory_pipeline_worker_subscriber_builder(
+    handle: iox2_port_factory_pipeline_h_ref,
+    stage_id: usize,
+    subscriber_builder_struct_ptr: *mut iox2_port_factory_subscriber_builder_t,
+    has_value: *mut bool,
+) -> iox2_port_factory_subscriber_builder_h {
+    handle.assert_non_null();
+    debug_assert!(!has_value.is_null());
+    *has_value = false;
+
+    let mut subscriber_builder_struct_ptr = subscriber_builder_struct_ptr;
+    fn no_op(_: *mut iox2_port_factory_subscriber_builder_t) {}
+    let mut deleter: fn(*mut iox2_port_factory_subscriber_builder_t) = no_op;
+    if subscriber_builder_struct_ptr.is_null() {
+        subscriber_builder_struct_ptr = iox2_port_factory_subscriber_builder_t::alloc();
+        deleter = iox2_port_factory_subscriber_builder_t::dealloc;
+    }
+    debug_assert!(!subscriber_builder_struct_ptr.is_null());
+
+    let port_factory = &mut *handle.as_type();
+    match port_factory.service_type {
+        iox2_service_type_e::IPC => {
+            let subscriber_builder = port_factory
+                .value
+                .as_ref()
+                .ipc
+                .__internal_worker_subscriber_builder(stage_id);
+            let Some(subscriber_builder) = subscriber_builder else {
+                return core::ptr::null_mut();
+            };
+
+            *has_value = true;
+            (*subscriber_builder_struct_ptr).init(
+                port_factory.service_type,
+                PortFactorySubscriberBuilderUnion::new_ipc(subscriber_builder),
+                deleter,
+            );
+        }
+        iox2_service_type_e::LOCAL => {
+            let subscriber_builder = port_factory
+                .value
+                .as_ref()
+                .local
+                .__internal_worker_subscriber_builder(stage_id);
+            let Some(subscriber_builder) = subscriber_builder else {
+                return core::ptr::null_mut();
+            };
+
+            *has_value = true;
+            (*subscriber_builder_struct_ptr).init(
+                port_factory.service_type,
+                PortFactorySubscriberBuilderUnion::new_local(subscriber_builder),
+                deleter,
+            );
+        }
+    };
+
+    (*subscriber_builder_struct_ptr).as_handle()
+}
+
+/// Instantiates a [`iox2_port_factory_publisher_builder_h`] for worker output at `stage_id`.
+/// If `stage_id` is out of bounds it returns `NULL` and sets `*has_value` to `false`.
+#[no_mangle]
+pub unsafe extern "C" fn iox2_port_factory_pipeline_worker_publisher_builder(
+    handle: iox2_port_factory_pipeline_h_ref,
+    stage_id: usize,
+    publisher_builder_struct_ptr: *mut iox2_port_factory_publisher_builder_t,
+    has_value: *mut bool,
+) -> iox2_port_factory_publisher_builder_h {
+    handle.assert_non_null();
+    debug_assert!(!has_value.is_null());
+    *has_value = false;
+
+    let mut publisher_builder_struct_ptr = publisher_builder_struct_ptr;
+    fn no_op(_: *mut iox2_port_factory_publisher_builder_t) {}
+    let mut deleter: fn(*mut iox2_port_factory_publisher_builder_t) = no_op;
+    if publisher_builder_struct_ptr.is_null() {
+        publisher_builder_struct_ptr = iox2_port_factory_publisher_builder_t::alloc();
+        deleter = iox2_port_factory_publisher_builder_t::dealloc;
+    }
+    debug_assert!(!publisher_builder_struct_ptr.is_null());
+
+    let port_factory = &mut *handle.as_type();
+    match port_factory.service_type {
+        iox2_service_type_e::IPC => {
+            let publisher_builder = port_factory
+                .value
+                .as_ref()
+                .ipc
+                .__internal_worker_publisher_builder(stage_id);
+            let Some(publisher_builder) = publisher_builder else {
+                return core::ptr::null_mut();
+            };
+
+            *has_value = true;
+            (*publisher_builder_struct_ptr).init(
+                port_factory.service_type,
+                PortFactoryPublisherBuilderUnion::new_ipc(publisher_builder),
+                deleter,
+            );
+        }
+        iox2_service_type_e::LOCAL => {
+            let publisher_builder = port_factory
+                .value
+                .as_ref()
+                .local
+                .__internal_worker_publisher_builder(stage_id);
+            let Some(publisher_builder) = publisher_builder else {
+                return core::ptr::null_mut();
+            };
+
+            *has_value = true;
+            (*publisher_builder_struct_ptr).init(
+                port_factory.service_type,
+                PortFactoryPublisherBuilderUnion::new_local(publisher_builder),
+                deleter,
+            );
+        }
+    };
+
+    (*publisher_builder_struct_ptr).as_handle()
+}
+
+/// Instantiates a [`iox2_port_factory_subscriber_builder_h`] for egress endpoints.
+#[no_mangle]
+pub unsafe extern "C" fn iox2_port_factory_pipeline_egress_builder(
+    handle: iox2_port_factory_pipeline_h_ref,
+    subscriber_builder_struct_ptr: *mut iox2_port_factory_subscriber_builder_t,
+) -> iox2_port_factory_subscriber_builder_h {
+    handle.assert_non_null();
+
+    let mut subscriber_builder_struct_ptr = subscriber_builder_struct_ptr;
+    fn no_op(_: *mut iox2_port_factory_subscriber_builder_t) {}
+    let mut deleter: fn(*mut iox2_port_factory_subscriber_builder_t) = no_op;
+    if subscriber_builder_struct_ptr.is_null() {
+        subscriber_builder_struct_ptr = iox2_port_factory_subscriber_builder_t::alloc();
+        deleter = iox2_port_factory_subscriber_builder_t::dealloc;
+    }
+    debug_assert!(!subscriber_builder_struct_ptr.is_null());
+
+    let port_factory = &mut *handle.as_type();
+    match port_factory.service_type {
+        iox2_service_type_e::IPC => {
+            let subscriber_builder = port_factory
+                .value
+                .as_ref()
+                .ipc
+                .__internal_egress_subscriber_builder();
+            (*subscriber_builder_struct_ptr).init(
+                port_factory.service_type,
+                PortFactorySubscriberBuilderUnion::new_ipc(subscriber_builder),
+                deleter,
+            );
+        }
+        iox2_service_type_e::LOCAL => {
+            let subscriber_builder = port_factory
+                .value
+                .as_ref()
+                .local
+                .__internal_egress_subscriber_builder();
+            (*subscriber_builder_struct_ptr).init(
+                port_factory.service_type,
+                PortFactorySubscriberBuilderUnion::new_local(subscriber_builder),
+                deleter,
+            );
+        }
+    };
+
+    (*subscriber_builder_struct_ptr).as_handle()
 }
 
 /// Calls the callback repeatedly for all [`Node`](iceoryx2::node::Node)s that have opened the service.

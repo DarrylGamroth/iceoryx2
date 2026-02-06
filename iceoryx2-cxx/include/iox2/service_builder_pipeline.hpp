@@ -17,6 +17,7 @@
 #include "iox2/attribute_verifier.hpp"
 #include "iox2/bb/detail/builder.hpp"
 #include "iox2/bb/expected.hpp"
+#include "iox2/bb/layout.hpp"
 #include "iox2/internal/iceoryx2.hpp"
 #include "iox2/internal/service_builder_internal.hpp"
 #include "iox2/payload_info.hpp"
@@ -26,7 +27,7 @@
 
 namespace iox2 {
 /// Builder to create new [`MessagingPattern::Pipeline`] based [`Service`]s.
-template <typename Payload, ServiceType S>
+template <typename Payload, typename UserHeader, ServiceType S>
 class ServiceBuilderPipeline {
   public:
     /// If the [`Service`] is created, defines how many worker stages are created.
@@ -63,29 +64,32 @@ class ServiceBuilderPipeline {
 #endif
 
   public:
+    /// Sets the user header type of the [`Service`].
+    template <typename NewHeader>
+    auto user_header() && -> ServiceBuilderPipeline<Payload, NewHeader, S>&&;
+
+  public:
     /// If the [`Service`] exists, it will be opened otherwise a new [`Service`] will be created.
-    auto open_or_create() && -> bb::Expected<PortFactoryPipeline<S, Payload>, PipelineOpenOrCreateError>;
+    auto open_or_create() && -> bb::Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineOpenOrCreateError>;
 
     /// If the [`Service`] exists, it will be opened otherwise a new [`Service`] will be created
     /// with a set of required attributes.
-    auto open_or_create_with_attributes(
-        const AttributeVerifier& required_attributes) && -> bb::Expected<PortFactoryPipeline<S, Payload>,
-                                                                         PipelineOpenOrCreateError>;
+    auto open_or_create_with_attributes(const AttributeVerifier& required_attributes) && -> bb::
+        Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineOpenOrCreateError>;
 
     /// Opens an existing [`Service`].
-    auto open() && -> bb::Expected<PortFactoryPipeline<S, Payload>, PipelineOpenError>;
+    auto open() && -> bb::Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineOpenError>;
 
     /// Opens an existing [`Service`] with attribute requirements.
-    auto open_with_attributes(
-        const AttributeVerifier& required_attributes) && -> bb::Expected<PortFactoryPipeline<S, Payload>,
-                                                                         PipelineOpenError>;
+    auto open_with_attributes(const AttributeVerifier& required_attributes) && -> bb::
+        Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineOpenError>;
 
     /// Creates a new [`Service`].
-    auto create() && -> bb::Expected<PortFactoryPipeline<S, Payload>, PipelineCreateError>;
+    auto create() && -> bb::Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineCreateError>;
 
     /// Creates a new [`Service`] with a set of attributes.
     auto create_with_attributes(const AttributeSpecifier& attributes) && -> bb::
-        Expected<PortFactoryPipeline<S, Payload>, PipelineCreateError>;
+        Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineCreateError>;
 
   private:
     template <ServiceType>
@@ -97,13 +101,13 @@ class ServiceBuilderPipeline {
     iox2_service_builder_pipeline_h m_handle = nullptr;
 };
 
-template <typename Payload, ServiceType S>
-inline ServiceBuilderPipeline<Payload, S>::ServiceBuilderPipeline(iox2_service_builder_h handle)
+template <typename Payload, typename UserHeader, ServiceType S>
+inline ServiceBuilderPipeline<Payload, UserHeader, S>::ServiceBuilderPipeline(iox2_service_builder_h handle)
     : m_handle { iox2_service_builder_pipeline(handle) } {
 }
 
-template <typename Payload, ServiceType S>
-inline void ServiceBuilderPipeline<Payload, S>::set_parameters() {
+template <typename Payload, typename UserHeader, ServiceType S>
+inline void ServiceBuilderPipeline<Payload, UserHeader, S>::set_parameters() {
     if (m_number_of_stages.has_value()) {
         iox2_service_builder_pipeline_set_number_of_stages(&m_handle, m_number_of_stages.value());
     }
@@ -132,27 +136,50 @@ inline void ServiceBuilderPipeline<Payload, S>::set_parameters() {
     if (payload_result != IOX2_OK) {
         IOX2_PANIC("This should never happen! Implementation failure while setting the Payload-Type.");
     }
+
+    const auto header_layout = bb::Layout::from<UserHeader>();
+    const auto user_header_type_name = internal::get_type_name<UserHeader>();
+    const auto user_header_result = iox2_service_builder_pipeline_set_user_header_type_details(
+        &m_handle,
+        iox2_type_variant_e_FIXED_SIZE,
+        user_header_type_name.unchecked_access().c_str(),
+        user_header_type_name.size(),
+        header_layout.size(),
+        header_layout.alignment());
+
+    if (user_header_result != IOX2_OK) {
+        IOX2_PANIC("This should never happen! Implementation failure while setting the User-Header-Type.");
+    }
 }
 
-template <typename Payload, ServiceType S>
-inline auto ServiceBuilderPipeline<Payload, S>::open_or_create() && -> bb::Expected<PortFactoryPipeline<S, Payload>,
-                                                                                     PipelineOpenOrCreateError> {
+template <typename Payload, typename UserHeader, ServiceType S>
+template <typename NewHeader>
+inline auto ServiceBuilderPipeline<Payload, UserHeader, S>::
+    user_header() && -> ServiceBuilderPipeline<Payload, NewHeader, S>&& {
+    // required here since we just change the template header type but the builder structure stays the same
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    return std::move(*reinterpret_cast<ServiceBuilderPipeline<Payload, NewHeader, S>*>(this));
+}
+
+template <typename Payload, typename UserHeader, ServiceType S>
+inline auto ServiceBuilderPipeline<Payload, UserHeader, S>::open_or_create() && -> bb::
+    Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineOpenOrCreateError> {
     set_parameters();
 
     iox2_port_factory_pipeline_h port_factory_handle {};
     auto result = iox2_service_builder_pipeline_open_or_create(m_handle, nullptr, &port_factory_handle);
 
     if (result == IOX2_OK) {
-        return PortFactoryPipeline<S, Payload>(port_factory_handle);
+        return PortFactoryPipeline<S, Payload, UserHeader>(port_factory_handle);
     }
 
     return bb::err(bb::into<PipelineOpenOrCreateError>(result));
 }
 
-template <typename Payload, ServiceType S>
-inline auto ServiceBuilderPipeline<Payload, S>::open_or_create_with_attributes(
-    const AttributeVerifier& required_attributes) && -> bb::Expected<PortFactoryPipeline<S, Payload>,
-                                                                     PipelineOpenOrCreateError> {
+template <typename Payload, typename UserHeader, ServiceType S>
+inline auto ServiceBuilderPipeline<Payload, UserHeader, S>::open_or_create_with_attributes(
+    const AttributeVerifier& required_attributes) && -> bb::
+    Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineOpenOrCreateError> {
     set_parameters();
 
     iox2_port_factory_pipeline_h port_factory_handle {};
@@ -160,31 +187,31 @@ inline auto ServiceBuilderPipeline<Payload, S>::open_or_create_with_attributes(
         m_handle, &required_attributes.m_handle, nullptr, &port_factory_handle);
 
     if (result == IOX2_OK) {
-        return PortFactoryPipeline<S, Payload>(port_factory_handle);
+        return PortFactoryPipeline<S, Payload, UserHeader>(port_factory_handle);
     }
 
     return bb::err(bb::into<PipelineOpenOrCreateError>(result));
 }
 
-template <typename Payload, ServiceType S>
-inline auto ServiceBuilderPipeline<Payload, S>::open() && -> bb::Expected<PortFactoryPipeline<S, Payload>,
-                                                                          PipelineOpenError> {
+template <typename Payload, typename UserHeader, ServiceType S>
+inline auto ServiceBuilderPipeline<Payload, UserHeader, S>::open() && -> bb::
+    Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineOpenError> {
     set_parameters();
 
     iox2_port_factory_pipeline_h port_factory_handle {};
     auto result = iox2_service_builder_pipeline_open(m_handle, nullptr, &port_factory_handle);
 
     if (result == IOX2_OK) {
-        return PortFactoryPipeline<S, Payload>(port_factory_handle);
+        return PortFactoryPipeline<S, Payload, UserHeader>(port_factory_handle);
     }
 
     return bb::err(bb::into<PipelineOpenError>(result));
 }
 
-template <typename Payload, ServiceType S>
-inline auto ServiceBuilderPipeline<Payload, S>::open_with_attributes(
-    const AttributeVerifier& required_attributes) && -> bb::Expected<PortFactoryPipeline<S, Payload>,
-                                                                     PipelineOpenError> {
+template <typename Payload, typename UserHeader, ServiceType S>
+inline auto ServiceBuilderPipeline<Payload, UserHeader, S>::open_with_attributes(
+    const AttributeVerifier& required_attributes) && -> bb::
+    Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineOpenError> {
     set_parameters();
 
     iox2_port_factory_pipeline_h port_factory_handle {};
@@ -192,30 +219,31 @@ inline auto ServiceBuilderPipeline<Payload, S>::open_with_attributes(
         m_handle, &required_attributes.m_handle, nullptr, &port_factory_handle);
 
     if (result == IOX2_OK) {
-        return PortFactoryPipeline<S, Payload>(port_factory_handle);
+        return PortFactoryPipeline<S, Payload, UserHeader>(port_factory_handle);
     }
 
     return bb::err(bb::into<PipelineOpenError>(result));
 }
 
-template <typename Payload, ServiceType S>
-inline auto ServiceBuilderPipeline<Payload, S>::create() && -> bb::Expected<PortFactoryPipeline<S, Payload>,
-                                                                            PipelineCreateError> {
+template <typename Payload, typename UserHeader, ServiceType S>
+inline auto ServiceBuilderPipeline<Payload, UserHeader, S>::create() && -> bb::
+    Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineCreateError> {
     set_parameters();
 
     iox2_port_factory_pipeline_h port_factory_handle {};
     auto result = iox2_service_builder_pipeline_create(m_handle, nullptr, &port_factory_handle);
 
     if (result == IOX2_OK) {
-        return PortFactoryPipeline<S, Payload>(port_factory_handle);
+        return PortFactoryPipeline<S, Payload, UserHeader>(port_factory_handle);
     }
 
     return bb::err(bb::into<PipelineCreateError>(result));
 }
 
-template <typename Payload, ServiceType S>
-inline auto ServiceBuilderPipeline<Payload, S>::create_with_attributes(
-    const AttributeSpecifier& attributes) && -> bb::Expected<PortFactoryPipeline<S, Payload>, PipelineCreateError> {
+template <typename Payload, typename UserHeader, ServiceType S>
+inline auto ServiceBuilderPipeline<Payload, UserHeader, S>::create_with_attributes(
+    const AttributeSpecifier& attributes) && -> bb::
+    Expected<PortFactoryPipeline<S, Payload, UserHeader>, PipelineCreateError> {
     set_parameters();
 
     iox2_port_factory_pipeline_h port_factory_handle {};
@@ -223,7 +251,7 @@ inline auto ServiceBuilderPipeline<Payload, S>::create_with_attributes(
         iox2_service_builder_pipeline_create_with_attributes(m_handle, &attributes.m_handle, nullptr, &port_factory_handle);
 
     if (result == IOX2_OK) {
-        return PortFactoryPipeline<S, Payload>(port_factory_handle);
+        return PortFactoryPipeline<S, Payload, UserHeader>(port_factory_handle);
     }
 
     return bb::err(bb::into<PipelineCreateError>(result));

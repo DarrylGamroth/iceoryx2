@@ -40,7 +40,7 @@ class StaticConfigPipeline {
     auto user_header_type_details() const -> TypeDetail;
 
   private:
-    template <ServiceType, typename>
+    template <ServiceType, typename, typename>
     friend class PortFactoryPipeline;
 
     explicit StaticConfigPipeline(iox2_static_config_pipeline_t value);

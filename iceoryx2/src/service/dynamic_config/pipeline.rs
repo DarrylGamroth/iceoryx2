@@ -15,9 +15,7 @@
 use iceoryx2_bb_memory::bump_allocator::BumpAllocator;
 
 use crate::{
-    node::NodeId,
-    port::port_identifiers::UniquePortId,
-    service::dynamic_config::PortCleanupAction,
+    node::NodeId, port::port_identifiers::UniquePortId, service::dynamic_config::PortCleanupAction,
 };
 
 #[repr(C)]

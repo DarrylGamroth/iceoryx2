@@ -22,7 +22,7 @@ The first version composes a pipeline from internal publish-subscribe edge servi
 - Heterogeneous payload types per stage in v1.
 - Cross-service transaction semantics.
 - Best-effort reordering across stages.
-- Stage-role runtime endpoint parity (`ingress`/`worker`/`egress`) in C/C++/Python in this branch.
+- Blocking/waiting stage-role APIs in C/C++/Python in this branch.
 
 ## Terminology
 - `Stage`: A numbered processing step in the pipeline (`0..N-1`).
@@ -261,8 +261,8 @@ The following areas must receive `Pipeline` wiring equivalent to existing patter
 ## Follow-Up Phases
 - [ ] Add first-class static/dynamic config messaging-pattern integration if pipeline becomes a standalone service kind.
 - [x] Extend C/C++/Python bindings with equivalent pipeline service-level APIs (builder lifecycle, config, metrics, errors).
-- [ ] Extend C/C++/Python bindings with runtime stage-role endpoint APIs (`ingress`/`worker`/`egress`) when required.
-- [ ] Add cross-language and matrix conformance suites for pipeline.
+- [x] Extend C/C++/Python bindings with runtime stage-role endpoint APIs (`ingress`/`worker`/`egress`) when required.
+- [x] Add cross-language and matrix conformance suites for pipeline.
 
 ## Validation Plan
 - Rust:
@@ -294,3 +294,7 @@ Follow-up validation once bindings are added:
 - 2026-02-06: Added C FFI pipeline service-level APIs and tests (`service_builder_pipeline` + `port_factory_pipeline` + static config wiring).
 - 2026-02-06: Added Python pipeline service-level bindings and tests (`ServiceBuilder.pipeline(...)`, `PortFactoryPipeline`, static config + messaging pattern/error wiring).
 - 2026-02-06: Added C++ first-class pipeline API surface (`ServiceBuilder::pipeline`, `PortFactoryPipeline`, `StaticConfigPipeline`, `Pipeline*Error` enums), enum translation wiring, and dedicated pipeline tests.
+- 2026-02-06: Added dedicated user-header mismatch diagnostics (`IncompatibleUserHeaderType`) across Rust, C FFI, and C++ API translations with integration test coverage.
+- 2026-02-06: Added runtime stage-role endpoint parity for C/C++/Python (`ingress_builder`, `worker_*_builder`, `egress_builder`) and dynamic role-list APIs for C/C++/Python pipeline port factories.
+- 2026-02-06: Added pipeline conformance matrix coverage across Rust service flavors (`ipc`, `local`, `ipc_threadsafe`, `local_threadsafe`) in `iceoryx2/conformance-tests/tests/service_pipeline_tests.rs`.
+- 2026-02-06: Added first-class pipeline examples for C/C++/Python as three separate entities (`ingress`, `worker`, `egress`), including dynamic payload + user-header examples for C++/Python and user-header stage forwarding for C.

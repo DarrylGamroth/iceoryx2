@@ -171,7 +171,9 @@ impl DynamicConfig {
             MessagingPattern::Blackboard(ref v) => {
                 v.remove_dead_node_id(node_id, port_cleanup_callback)
             }
-            MessagingPattern::Pipeline(ref v) => v.remove_dead_node_id(node_id, port_cleanup_callback),
+            MessagingPattern::Pipeline(ref v) => {
+                v.remove_dead_node_id(node_id, port_cleanup_callback)
+            }
         };
 
         let mut ret_val = Err(RemoveDeadNodeResult::NodeNotRegistered);

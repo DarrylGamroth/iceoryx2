@@ -64,7 +64,7 @@ class AttributeSetView {
     friend class PortFactoryEvent;
     template <ServiceType, typename>
     friend class PortFactoryBlackboard;
-    template <ServiceType, typename>
+    template <ServiceType, typename, typename>
     friend class PortFactoryPipeline;
     friend class AttributeVerifier;
     friend class AttributeSpecifier;

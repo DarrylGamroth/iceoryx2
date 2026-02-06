@@ -49,7 +49,7 @@ class AttributeSpecifier {
     friend class ServiceBuilderRequestResponse;
     template <typename, ServiceType>
     friend class ServiceBuilderBlackboardCreator;
-    template <typename, ServiceType>
+    template <typename, typename, ServiceType>
     friend class ServiceBuilderPipeline;
 
     void drop();

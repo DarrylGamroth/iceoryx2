@@ -70,6 +70,8 @@ class PortFactoryPublisher {
   private:
     template <ServiceType, typename, typename>
     friend class PortFactoryPublishSubscribe;
+    template <ServiceType, typename, typename>
+    friend class PortFactoryPipeline;
 
     explicit PortFactoryPublisher(iox2_port_factory_publisher_builder_h handle);
 

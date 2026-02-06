@@ -11,6 +11,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use iceoryx2::prelude::*;
+use iceoryx2::service::builder::pipeline::PipelineOpenError;
 use iceoryx2::service::port_factory::pipeline::WorkerCreateError;
 use iceoryx2::testing::*;
 use iceoryx2_bb_testing::assert_that;
@@ -21,6 +22,12 @@ use iceoryx2_bb_testing::watchdog::Watchdog;
 struct PipelineUserHeader {
     stage: u8,
     sequence: u64,
+}
+
+#[derive(Default, Debug, ZeroCopySend)]
+#[repr(C)]
+struct PipelineOtherHeader {
+    stage: u32,
 }
 
 #[test]
@@ -288,6 +295,35 @@ fn dynamic_payload_pipeline_with_user_header_and_attributes_work() {
             CallbackProgression::Continue
         });
     assert_that!(opened_values, contains String::from(value));
+}
+
+#[test]
+fn opening_existing_pipeline_with_wrong_user_header_fails() {
+    let _watchdog = Watchdog::new();
+    type ServiceType = ipc::Service;
+
+    let service_name = generate_service_name();
+    let config = generate_isolated_config();
+    let node = NodeBuilder::new()
+        .config(&config)
+        .create::<ServiceType>()
+        .unwrap();
+
+    let _created = node
+        .service_builder(&service_name)
+        .pipeline::<u64>()
+        .user_header::<PipelineUserHeader>()
+        .create()
+        .unwrap();
+
+    let result = node
+        .service_builder(&service_name)
+        .pipeline::<u64>()
+        .user_header::<PipelineOtherHeader>()
+        .open();
+
+    assert_that!(result, is_err);
+    assert_that!(result.err().unwrap(), eq PipelineOpenError::IncompatibleUserHeaderType);
 }
 
 #[test]

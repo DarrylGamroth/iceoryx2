@@ -30,6 +30,8 @@ enum class PipelineOpenError : uint8_t {
     IncompatibleAttributes,
     /// The [`Service`] has an incompatible payload type.
     IncompatiblePayloadType,
+    /// The [`Service`] has an incompatible user header type.
+    IncompatibleUserHeaderType,
     /// The [`Service`] creation timeout has passed and it is still not initialized.
     HangsInCreation,
     /// The [`Service`] supports less [`Node`](crate::node::Node)s than requested.
@@ -86,6 +88,8 @@ enum class PipelineOpenOrCreateError : uint8_t {
     OpenIncompatibleAttributes,
     /// The [`Service`] has an incompatible payload type.
     OpenIncompatiblePayloadType,
+    /// The [`Service`] has an incompatible user header type.
+    OpenIncompatibleUserHeaderType,
     /// The [`Service`] creation timeout has passed and it is still not initialized.
     OpenHangsInCreation,
     /// The [`Service`] supports less [`Node`](crate::node::Node)s than requested.

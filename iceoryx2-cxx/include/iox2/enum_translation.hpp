@@ -1141,6 +1141,8 @@ constexpr auto from<int, iox2::PipelineOpenError>(const int value) noexcept -> i
         return iox2::PipelineOpenError::IncompatibleAttributes;
     case iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_PAYLOAD_TYPE:
         return iox2::PipelineOpenError::IncompatiblePayloadType;
+    case iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_USER_HEADER_TYPE:
+        return iox2::PipelineOpenError::IncompatibleUserHeaderType;
     case iox2_pipeline_open_or_create_error_e_O_HANGS_IN_CREATION:
         return iox2::PipelineOpenError::HangsInCreation;
     case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_NODES:
@@ -1183,6 +1185,8 @@ from<iox2::PipelineOpenError, iox2_pipeline_open_or_create_error_e>(const iox2::
         return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_ATTRIBUTES;
     case iox2::PipelineOpenError::IncompatiblePayloadType:
         return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_PAYLOAD_TYPE;
+    case iox2::PipelineOpenError::IncompatibleUserHeaderType:
+        return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_USER_HEADER_TYPE;
     case iox2::PipelineOpenError::HangsInCreation:
         return iox2_pipeline_open_or_create_error_e_O_HANGS_IN_CREATION;
     case iox2::PipelineOpenError::DoesNotSupportRequestedAmountOfNodes:
@@ -1286,6 +1290,8 @@ constexpr auto from<int, iox2::PipelineOpenOrCreateError>(const int value) noexc
         return iox2::PipelineOpenOrCreateError::OpenIncompatibleAttributes;
     case iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_PAYLOAD_TYPE:
         return iox2::PipelineOpenOrCreateError::OpenIncompatiblePayloadType;
+    case iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_USER_HEADER_TYPE:
+        return iox2::PipelineOpenOrCreateError::OpenIncompatibleUserHeaderType;
     case iox2_pipeline_open_or_create_error_e_O_HANGS_IN_CREATION:
         return iox2::PipelineOpenOrCreateError::OpenHangsInCreation;
     case iox2_pipeline_open_or_create_error_e_O_DOES_NOT_SUPPORT_REQUESTED_AMOUNT_OF_NODES:
@@ -1346,6 +1352,8 @@ constexpr auto from<iox2::PipelineOpenOrCreateError, iox2_pipeline_open_or_creat
         return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_ATTRIBUTES;
     case iox2::PipelineOpenOrCreateError::OpenIncompatiblePayloadType:
         return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_PAYLOAD_TYPE;
+    case iox2::PipelineOpenOrCreateError::OpenIncompatibleUserHeaderType:
+        return iox2_pipeline_open_or_create_error_e_O_INCOMPATIBLE_USER_HEADER_TYPE;
     case iox2::PipelineOpenOrCreateError::OpenHangsInCreation:
         return iox2_pipeline_open_or_create_error_e_O_HANGS_IN_CREATION;
     case iox2::PipelineOpenOrCreateError::OpenDoesNotSupportRequestedAmountOfNodes:

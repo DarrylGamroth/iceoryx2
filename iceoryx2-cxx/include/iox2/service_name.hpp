@@ -49,7 +49,7 @@ class ServiceNameView {
     friend class PortFactoryRequestResponse;
     template <ServiceType, typename>
     friend class PortFactoryBlackboard;
-    template <ServiceType, typename>
+    template <ServiceType, typename, typename>
     friend class PortFactoryPipeline;
 
     explicit ServiceNameView(iox2_service_name_ptr ptr);

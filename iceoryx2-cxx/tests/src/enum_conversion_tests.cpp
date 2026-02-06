@@ -231,6 +231,7 @@ TEST(EnumConversionTest, pipeline_open_into_c_str) {
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::IncompatibleMessagingPattern)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::IncompatibleAttributes)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::IncompatiblePayloadType)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::IncompatibleUserHeaderType)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::HangsInCreation)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::DoesNotSupportRequestedAmountOfNodes)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::DoesNotSupportRequestedAmountOfStages)), 1U);
@@ -263,6 +264,7 @@ TEST(EnumConversionTest, pipeline_open_or_create_into_c_str) {
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenIncompatibleMessagingPattern)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenIncompatibleAttributes)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenIncompatiblePayloadType)), 1U);
+    ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenIncompatibleUserHeaderType)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenHangsInCreation)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenDoesNotSupportRequestedAmountOfNodes)), 1U);
     ASSERT_GT(strlen(iox2::bb::into<const char*>(Sut::OpenDoesNotSupportRequestedAmountOfStages)), 1U);
