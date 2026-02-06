@@ -192,6 +192,36 @@ path = "rust/publish_subscribe_with_user_header/publisher.rs"
 name = "publish_subscribe_user_header_subscriber"
 path = "rust/publish_subscribe_with_user_header/subscriber.rs"
 
+# log
+
+[[example]]
+name = "log_appender"
+path = "rust/log/appender.rs"
+
+[[example]]
+name = "log_tailer"
+path = "rust/log/tailer.rs"
+
+# log_dynamic_data
+
+[[example]]
+name = "log_dyn_appender"
+path = "rust/log_dynamic_data/appender.rs"
+
+[[example]]
+name = "log_dyn_tailer"
+path = "rust/log_dynamic_data/tailer.rs"
+
+# log_with_user_header
+
+[[example]]
+name = "log_user_header_appender"
+path = "rust/log_with_user_header/appender.rs"
+
+[[example]]
+name = "log_user_header_tailer"
+path = "rust/log_with_user_header/tailer.rs"
+
 # request_response
 
 [[example]]
