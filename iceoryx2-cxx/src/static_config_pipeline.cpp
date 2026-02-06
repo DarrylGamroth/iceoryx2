@@ -36,4 +36,8 @@ auto StaticConfigPipeline::initial_max_slice_len() const -> size_t {
 auto StaticConfigPipeline::payload_type_details() const -> TypeDetail {
     return TypeDetail(m_value.payload_type_details);
 }
+
+auto StaticConfigPipeline::user_header_type_details() const -> TypeDetail {
+    return TypeDetail(m_value.user_header_type_details);
+}
 } // namespace iox2

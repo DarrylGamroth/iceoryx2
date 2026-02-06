@@ -49,6 +49,7 @@ The first version composes a pipeline from internal publish-subscribe edge servi
 - `R15`: Service builder shall expose the standard lifecycle methods (`open_or_create`, `open`, `create`, and `*_with_attributes`).
 - `R16`: Receive semantics shall follow existing non-blocking shape (`receive() -> Result<Option<_>, ReceiveError>`).
 - `R17`: Pipeline shall support pub/sub-style dynamic payload semantics at ingress (`[T]` payload + `loan_slice_uninit(len)`), with bounded maximum configured at creation time.
+- `R18`: Pipeline shall support pub/sub-style user headers (`user_header::<H>()`) with stage-to-stage propagation and in-place mutation.
 
 ## Proposed API Shape (Draft)
 Rust naming follows existing builder conventions and may be adjusted during implementation review.
@@ -132,6 +133,8 @@ if let Some(mut work) = stage1.receive()? {
 ## Idiomatic API Conventions
 - Service entrypoint follows existing pattern builder style:
 - `node.service_builder(...).pipeline::<Payload>()`
+- Optional user header follows pub/sub conventions:
+- `.user_header::<UserHeader>()`
 - Lifecycle methods mirror existing patterns:
 - `open_or_create`, `open`, `create`, `open_or_create_with_attributes`, `open_with_attributes`, `create_with_attributes`
 - Port factory role builders follow `<role>_builder()` naming:
@@ -253,6 +256,7 @@ The following areas must receive `Pipeline` wiring equivalent to existing patter
 - [x] Phase 4: Implement runtime behavior for fixed and dynamic payloads (`[T]`) with bounded capacities.
 - [x] Phase 5: Add Rust integration tests for lifecycle, flow, and stage-bound checks.
 - [x] Phase 6: Add/update Rust examples and top-level docs to expose pipeline usage.
+- [x] Phase 7: Add dynamic-payload + user-header pipeline example set and integration coverage.
 
 ## Follow-Up Phases
 - [ ] Add first-class static/dynamic config messaging-pattern integration if pipeline becomes a standalone service kind.

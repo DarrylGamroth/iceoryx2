@@ -23,6 +23,7 @@ pub struct iox2_static_config_pipeline_t {
     pub max_nodes: usize,
     pub initial_max_slice_len: usize,
     pub payload_type_details: iox2_type_detail_t,
+    pub user_header_type_details: iox2_type_detail_t,
 }
 
 impl From<&StaticConfig> for iox2_static_config_pipeline_t {
@@ -33,6 +34,7 @@ impl From<&StaticConfig> for iox2_static_config_pipeline_t {
             max_nodes: c.max_nodes(),
             initial_max_slice_len: c.initial_max_slice_len(),
             payload_type_details: c.payload_type_details().into(),
+            user_header_type_details: c.user_header_type_details().into(),
         }
     }
 }

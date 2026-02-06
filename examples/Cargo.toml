@@ -176,6 +176,20 @@ path = "rust/pipeline/worker.rs"
 name = "pipeline_egress"
 path = "rust/pipeline/egress.rs"
 
+# pipeline_dynamic_user_header
+
+[[example]]
+name = "pipeline_dyn_user_header_ingress"
+path = "rust/pipeline_dynamic_user_header/ingress.rs"
+
+[[example]]
+name = "pipeline_dyn_user_header_worker"
+path = "rust/pipeline_dynamic_user_header/worker.rs"
+
+[[example]]
+name = "pipeline_dyn_user_header_egress"
+path = "rust/pipeline_dynamic_user_header/egress.rs"
+
 # publish_subscribe
 
 [[example]]

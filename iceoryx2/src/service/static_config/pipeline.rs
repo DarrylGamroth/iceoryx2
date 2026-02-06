@@ -30,6 +30,7 @@ pub struct StaticConfig {
     pub(crate) max_nodes: usize,
     pub(crate) initial_max_slice_len: usize,
     pub(crate) payload_type_details: TypeDetail,
+    pub(crate) user_header_type_details: TypeDetail,
 }
 
 impl StaticConfig {
@@ -40,6 +41,7 @@ impl StaticConfig {
             max_nodes: config.defaults.publish_subscribe.max_nodes,
             initial_max_slice_len: 1,
             payload_type_details: TypeDetail::default(),
+            user_header_type_details: TypeDetail::default(),
         }
     }
 
@@ -66,5 +68,10 @@ impl StaticConfig {
     /// Returns payload type details of this pipeline service.
     pub fn payload_type_details(&self) -> &TypeDetail {
         &self.payload_type_details
+    }
+
+    /// Returns user header type details of this pipeline service.
+    pub fn user_header_type_details(&self) -> &TypeDetail {
+        &self.user_header_type_details
     }
 }

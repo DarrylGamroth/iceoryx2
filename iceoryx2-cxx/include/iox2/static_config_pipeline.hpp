@@ -36,6 +36,9 @@ class StaticConfigPipeline {
     /// Returns the payload type details of the service.
     auto payload_type_details() const -> TypeDetail;
 
+    /// Returns the user header type details of the service.
+    auto user_header_type_details() const -> TypeDetail;
+
   private:
     template <ServiceType, typename>
     friend class PortFactoryPipeline;

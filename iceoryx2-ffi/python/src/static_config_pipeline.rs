@@ -16,7 +16,9 @@ use crate::type_detail::TypeDetail;
 
 #[pyclass]
 /// The static configuration of a `MessagingPattern::Pipeline` based `Service`.
-pub struct StaticConfigPipeline(pub(crate) iceoryx2::service::static_config::pipeline::StaticConfig);
+pub struct StaticConfigPipeline(
+    pub(crate) iceoryx2::service::static_config::pipeline::StaticConfig,
+);
 
 #[pymethods]
 impl StaticConfigPipeline {
@@ -48,5 +50,11 @@ impl StaticConfigPipeline {
     /// Returns payload type details of the service.
     pub fn payload_type_details(&self) -> TypeDetail {
         TypeDetail(*self.0.payload_type_details())
+    }
+
+    #[getter]
+    /// Returns user header type details of the service.
+    pub fn user_header_type_details(&self) -> TypeDetail {
+        TypeDetail(*self.0.user_header_type_details())
     }
 }

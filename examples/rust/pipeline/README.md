@@ -7,6 +7,10 @@ processes:
 * worker stage `0` adds `10`
 * egress receives and prints the final values
 
+For dynamic payload and user-header semantics, see:
+
+* `examples/rust/pipeline_dynamic_user_header/README.md`
+
 ## How to Run
 
 Open three terminals.

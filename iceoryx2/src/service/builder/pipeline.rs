@@ -41,8 +41,8 @@ use crate::service::static_config::messaging_pattern::MessagingPattern;
 use crate::service::{dynamic_config, NoResource};
 
 use super::{
-    Builder as ServiceBuilder, BuilderWithServiceType, CustomPayloadMarker, OpenDynamicStorageFailure,
-    ServiceState, RETRY_LIMIT,
+    Builder as ServiceBuilder, BuilderWithServiceType, CustomHeaderMarker, CustomPayloadMarker,
+    OpenDynamicStorageFailure, ServiceState, RETRY_LIMIT,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +109,9 @@ impl core::error::Error for PipelineOpenError {}
 impl From<ServiceState> for PipelineOpenError {
     fn from(value: ServiceState) -> Self {
         match value {
-            ServiceState::IncompatibleMessagingPattern => PipelineOpenError::IncompatibleMessagingPattern,
+            ServiceState::IncompatibleMessagingPattern => {
+                PipelineOpenError::IncompatibleMessagingPattern
+            }
             ServiceState::InsufficientPermissions => PipelineOpenError::InsufficientPermissions,
             ServiceState::HangsInCreation => PipelineOpenError::HangsInCreation,
             ServiceState::Corrupted => PipelineOpenError::ServiceInCorruptedState,
@@ -197,18 +199,27 @@ impl core::error::Error for PipelineOpenOrCreateError {}
 
 #[derive(Debug)]
 /// Builder for a staged pipeline.
-pub struct Builder<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service> {
+pub struct Builder<
+    Payload: Debug + ZeroCopySend + ?Sized,
+    ServiceType: service::Service,
+    UserHeader: Debug + ZeroCopySend = (),
+> {
     base: BuilderWithServiceType<ServiceType>,
     verify_number_of_stages: bool,
     verify_max_in_flight_samples: bool,
     verify_max_nodes: bool,
     verify_initial_max_slice_len: bool,
     override_payload_type: Option<TypeDetail>,
+    override_user_header_type: Option<TypeDetail>,
     _payload: PhantomData<Payload>,
+    _user_header: PhantomData<UserHeader>,
 }
 
-impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service> Clone
-    for Builder<Payload, ServiceType>
+impl<
+        Payload: Debug + ZeroCopySend + ?Sized,
+        ServiceType: service::Service,
+        UserHeader: Debug + ZeroCopySend,
+    > Clone for Builder<Payload, ServiceType, UserHeader>
 {
     fn clone(&self) -> Self {
         Self {
@@ -218,13 +229,18 @@ impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service> Clon
             verify_max_nodes: self.verify_max_nodes,
             verify_initial_max_slice_len: self.verify_initial_max_slice_len,
             override_payload_type: self.override_payload_type,
+            override_user_header_type: self.override_user_header_type,
             _payload: PhantomData,
+            _user_header: PhantomData,
         }
     }
 }
 
-impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service>
-    Builder<Payload, ServiceType>
+impl<
+        Payload: Debug + ZeroCopySend + ?Sized,
+        ServiceType: service::Service,
+        UserHeader: Debug + ZeroCopySend,
+    > Builder<Payload, ServiceType, UserHeader>
 {
     pub(crate) fn new(base: BuilderWithServiceType<ServiceType>) -> Self {
         let mut new_self = Self {
@@ -234,7 +250,9 @@ impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service>
             verify_max_nodes: false,
             verify_initial_max_slice_len: false,
             override_payload_type: None,
+            override_user_header_type: None,
             _payload: PhantomData,
+            _user_header: PhantomData,
         };
 
         new_self.base.service_config.messaging_pattern = MessagingPattern::Pipeline(
@@ -242,6 +260,11 @@ impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service>
         );
 
         new_self
+    }
+
+    /// Sets the user header type of the [`Service`].
+    pub fn user_header<M: Debug + ZeroCopySend>(self) -> Builder<Payload, ServiceType, M> {
+        unsafe { core::mem::transmute::<Self, Builder<Payload, ServiceType, M>>(self) }
     }
 
     fn config_details(&self) -> &static_config::pipeline::StaticConfig {
@@ -326,9 +349,10 @@ impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service>
         &self,
         edge_service_name: &ServiceName,
         settings: &static_config::pipeline::StaticConfig,
-    ) -> super::publish_subscribe::Builder<EdgePayload, (), ServiceType> {
+    ) -> super::publish_subscribe::Builder<EdgePayload, UserHeader, ServiceType> {
         ServiceBuilder::new(edge_service_name, self.base.shared_node.clone())
             .publish_subscribe::<EdgePayload>()
+            .user_header::<UserHeader>()
             .max_publishers(1)
             .max_subscribers(1)
             .history_size(0)
@@ -339,17 +363,29 @@ impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service>
 
     fn verify_type_compatibility(
         &self,
-        existing: &TypeDetail,
+        existing_payload: &TypeDetail,
+        existing_user_header: &TypeDetail,
     ) -> Result<(), PipelineOpenError> {
-        let requested = self.config_details().payload_type_details;
-        if requested.type_name() != existing.type_name()
-            || requested.variant() != existing.variant()
-            || requested.size() != existing.size()
-            || requested.alignment() > existing.alignment()
+        let requested_payload = self.config_details().payload_type_details;
+        if requested_payload.type_name() != existing_payload.type_name()
+            || requested_payload.variant() != existing_payload.variant()
+            || requested_payload.size() != existing_payload.size()
+            || requested_payload.alignment() > existing_payload.alignment()
         {
             fail!(from self, with PipelineOpenError::IncompatiblePayloadType,
                 "Unable to open pipeline service since the service offers the payload type \"{:?}\" which is not compatible to the requested payload type \"{:?}\".",
-                existing, requested);
+                existing_payload, requested_payload);
+        }
+
+        let requested_user_header = self.config_details().user_header_type_details;
+        if requested_user_header.type_name() != existing_user_header.type_name()
+            || requested_user_header.variant() != existing_user_header.variant()
+            || requested_user_header.size() != existing_user_header.size()
+            || requested_user_header.alignment() > existing_user_header.alignment()
+        {
+            fail!(from self, with PipelineOpenError::IncompatiblePayloadType,
+                "Unable to open pipeline service since the service offers the user header type \"{:?}\" which is not compatible to the requested user header type \"{:?}\".",
+                existing_user_header, requested_user_header);
         }
 
         Ok(())
@@ -377,7 +413,10 @@ impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service>
             }
         };
 
-        self.verify_type_compatibility(existing_settings.payload_type_details())?;
+        self.verify_type_compatibility(
+            existing_settings.payload_type_details(),
+            existing_settings.user_header_type_details(),
+        )?;
 
         let required_settings = self.config_details();
 
@@ -588,9 +627,9 @@ impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service>
                     Err(e) => return Err(e.into()),
                 },
                 None => {
-                    match self
-                        .create_pipeline_service(&AttributeSpecifier(verifier.required_attributes().clone()))
-                    {
+                    match self.create_pipeline_service(&AttributeSpecifier(
+                        verifier.required_attributes().clone(),
+                    )) {
                         Ok(factory) => return Ok(factory),
                         Err(PipelineCreateError::AlreadyExists)
                         | Err(PipelineCreateError::IsBeingCreatedByAnotherInstance) => {
@@ -604,14 +643,25 @@ impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service>
     }
 }
 
-impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
-    Builder<Payload, ServiceType>
+impl<
+        Payload: Debug + ZeroCopySend + 'static,
+        ServiceType: service::Service,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > Builder<Payload, ServiceType, UserHeader>
 {
     fn prepare_config_details(&mut self) {
         if let Some(details) = &self.override_payload_type {
             self.config_details_mut().payload_type_details = *details;
         } else {
-            self.config_details_mut().payload_type_details = TypeDetail::new::<Payload>(TypeVariant::FixedSize);
+            self.config_details_mut().payload_type_details =
+                TypeDetail::new::<Payload>(TypeVariant::FixedSize);
+        }
+
+        if let Some(details) = &self.override_user_header_type {
+            self.config_details_mut().user_header_type_details = *details;
+        } else {
+            self.config_details_mut().user_header_type_details =
+                TypeDetail::new::<UserHeader>(TypeVariant::FixedSize);
         }
     }
 
@@ -620,14 +670,21 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
         settings: &static_config::pipeline::StaticConfig,
         attributes: &AttributeSpecifier,
     ) -> Result<
-        Vec<crate::service::port_factory::publish_subscribe::PortFactory<ServiceType, Payload, ()>>,
+        Vec<
+            crate::service::port_factory::publish_subscribe::PortFactory<
+                ServiceType,
+                Payload,
+                UserHeader,
+            >,
+        >,
         PipelineCreateError,
     > {
         let mut edges = Vec::with_capacity(settings.number_of_stages() + 1);
 
         for edge_index in 0..=settings.number_of_stages() {
-            let edge_service_name = Self::edge_service_name(self.base.service_config.name(), edge_index)
-                .map_err(PipelineCreateError::InvalidConfiguration)?;
+            let edge_service_name =
+                Self::edge_service_name(self.base.service_config.name(), edge_index)
+                    .map_err(PipelineCreateError::InvalidConfiguration)?;
             let stage = self.configure_edge_builder::<Payload>(&edge_service_name, settings);
             let edge_factory = stage
                 .create_with_attributes(attributes)
@@ -643,14 +700,21 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
         settings: &static_config::pipeline::StaticConfig,
         verifier: &AttributeVerifier,
     ) -> Result<
-        Vec<crate::service::port_factory::publish_subscribe::PortFactory<ServiceType, Payload, ()>>,
+        Vec<
+            crate::service::port_factory::publish_subscribe::PortFactory<
+                ServiceType,
+                Payload,
+                UserHeader,
+            >,
+        >,
         PipelineOpenError,
     > {
         let mut edges = Vec::with_capacity(settings.number_of_stages() + 1);
 
         for edge_index in 0..=settings.number_of_stages() {
-            let edge_service_name = Self::edge_service_name(self.base.service_config.name(), edge_index)
-                .map_err(PipelineOpenError::InvalidConfiguration)?;
+            let edge_service_name =
+                Self::edge_service_name(self.base.service_config.name(), edge_index)
+                    .map_err(PipelineOpenError::InvalidConfiguration)?;
             let stage = self.configure_edge_builder::<Payload>(&edge_service_name, settings);
             let edge_factory = stage
                 .open_with_attributes(verifier)
@@ -666,28 +730,45 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
         settings: &static_config::pipeline::StaticConfig,
         verifier: &AttributeVerifier,
     ) -> Result<
-        Vec<crate::service::port_factory::publish_subscribe::PortFactory<ServiceType, Payload, ()>>,
+        Vec<
+            crate::service::port_factory::publish_subscribe::PortFactory<
+                ServiceType,
+                Payload,
+                UserHeader,
+            >,
+        >,
         PipelineOpenOrCreateError,
     > {
         let mut edges = Vec::with_capacity(settings.number_of_stages() + 1);
 
         for edge_index in 0..=settings.number_of_stages() {
-            let edge_service_name = Self::edge_service_name(self.base.service_config.name(), edge_index)
-                .map_err(|e| PipelineOpenOrCreateError::PipelineCreateError(PipelineCreateError::InvalidConfiguration(e)))?;
+            let edge_service_name =
+                Self::edge_service_name(self.base.service_config.name(), edge_index).map_err(
+                    |e| {
+                        PipelineOpenOrCreateError::PipelineCreateError(
+                            PipelineCreateError::InvalidConfiguration(e),
+                        )
+                    },
+                )?;
             let stage = self.configure_edge_builder::<Payload>(&edge_service_name, settings);
-            let edge_factory = stage
-                .open_or_create_with_attributes(verifier)
-                .map_err(|e| match e {
-                    PublishSubscribeOpenOrCreateError::PublishSubscribeOpenError(v) => {
-                        PipelineOpenOrCreateError::PipelineOpenError(PipelineOpenError::EdgeFailure(v))
-                    }
-                    PublishSubscribeOpenOrCreateError::PublishSubscribeCreateError(v) => {
-                        PipelineOpenOrCreateError::PipelineCreateError(PipelineCreateError::EdgeFailure(v))
-                    }
-                    PublishSubscribeOpenOrCreateError::SystemInFlux => {
-                        PipelineOpenOrCreateError::SystemInFlux
-                    }
-                })?;
+            let edge_factory =
+                stage
+                    .open_or_create_with_attributes(verifier)
+                    .map_err(|e| match e {
+                        PublishSubscribeOpenOrCreateError::PublishSubscribeOpenError(v) => {
+                            PipelineOpenOrCreateError::PipelineOpenError(
+                                PipelineOpenError::EdgeFailure(v),
+                            )
+                        }
+                        PublishSubscribeOpenOrCreateError::PublishSubscribeCreateError(v) => {
+                            PipelineOpenOrCreateError::PipelineCreateError(
+                                PipelineCreateError::EdgeFailure(v),
+                            )
+                        }
+                        PublishSubscribeOpenOrCreateError::SystemInFlux => {
+                            PipelineOpenOrCreateError::SystemInFlux
+                        }
+                    })?;
             edges.push(edge_factory);
         }
 
@@ -697,7 +778,8 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     /// Opens an existing pipeline service chain or creates it when missing.
     pub fn open_or_create(
         self,
-    ) -> Result<pipeline::PortFactory<ServiceType, Payload>, PipelineOpenOrCreateError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, Payload, UserHeader>, PipelineOpenOrCreateError>
+    {
         self.open_or_create_with_attributes(&AttributeVerifier::new())
     }
 
@@ -705,7 +787,8 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     pub fn open_or_create_with_attributes(
         mut self,
         verifier: &AttributeVerifier,
-    ) -> Result<pipeline::PortFactory<ServiceType, Payload>, PipelineOpenOrCreateError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, Payload, UserHeader>, PipelineOpenOrCreateError>
+    {
         self.prepare();
         self.prepare_config_details();
 
@@ -719,7 +802,7 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     /// Opens an existing pipeline service chain.
     pub fn open(
         self,
-    ) -> Result<pipeline::PortFactory<ServiceType, Payload>, PipelineOpenError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, Payload, UserHeader>, PipelineOpenError> {
         self.open_with_attributes(&AttributeVerifier::new())
     }
 
@@ -727,7 +810,7 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     pub fn open_with_attributes(
         mut self,
         verifier: &AttributeVerifier,
-    ) -> Result<pipeline::PortFactory<ServiceType, Payload>, PipelineOpenError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, Payload, UserHeader>, PipelineOpenError> {
         self.prepare();
         self.prepare_config_details();
 
@@ -741,7 +824,7 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     /// Creates a new pipeline service chain.
     pub fn create(
         self,
-    ) -> Result<pipeline::PortFactory<ServiceType, Payload>, PipelineCreateError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, Payload, UserHeader>, PipelineCreateError> {
         self.create_with_attributes(&AttributeSpecifier::new())
     }
 
@@ -749,7 +832,7 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     pub fn create_with_attributes(
         mut self,
         attributes: &AttributeSpecifier,
-    ) -> Result<pipeline::PortFactory<ServiceType, Payload>, PipelineCreateError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, Payload, UserHeader>, PipelineCreateError> {
         self.prepare();
         self.prepare_config_details();
 
@@ -761,21 +844,24 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     }
 }
 
-impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
-    Builder<[Payload], ServiceType>
+impl<
+        Payload: Debug + ZeroCopySend + 'static,
+        ServiceType: service::Service,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > Builder<[Payload], ServiceType, UserHeader>
 {
     fn maybe_apply_payload_type_override(
         &self,
-        stage: super::publish_subscribe::Builder<[Payload], (), ServiceType>,
-    ) -> super::publish_subscribe::Builder<[Payload], (), ServiceType> {
+        stage: super::publish_subscribe::Builder<[Payload], UserHeader, ServiceType>,
+    ) -> super::publish_subscribe::Builder<[Payload], UserHeader, ServiceType> {
         if TypeId::of::<Payload>() != TypeId::of::<CustomPayloadMarker>() {
             return stage;
         }
 
         let stage = unsafe {
             core::mem::transmute::<
-                super::publish_subscribe::Builder<[Payload], (), ServiceType>,
-                super::publish_subscribe::Builder<[CustomPayloadMarker], (), ServiceType>,
+                super::publish_subscribe::Builder<[Payload], UserHeader, ServiceType>,
+                super::publish_subscribe::Builder<[CustomPayloadMarker], UserHeader, ServiceType>,
             >(stage)
         };
 
@@ -787,8 +873,8 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
 
         unsafe {
             core::mem::transmute::<
-                super::publish_subscribe::Builder<[CustomPayloadMarker], (), ServiceType>,
-                super::publish_subscribe::Builder<[Payload], (), ServiceType>,
+                super::publish_subscribe::Builder<[CustomPayloadMarker], UserHeader, ServiceType>,
+                super::publish_subscribe::Builder<[Payload], UserHeader, ServiceType>,
             >(stage)
         }
     }
@@ -797,7 +883,15 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
         if let Some(details) = &self.override_payload_type {
             self.config_details_mut().payload_type_details = *details;
         } else {
-            self.config_details_mut().payload_type_details = TypeDetail::new::<Payload>(TypeVariant::Dynamic);
+            self.config_details_mut().payload_type_details =
+                TypeDetail::new::<Payload>(TypeVariant::Dynamic);
+        }
+
+        if let Some(details) = &self.override_user_header_type {
+            self.config_details_mut().user_header_type_details = *details;
+        } else {
+            self.config_details_mut().user_header_type_details =
+                TypeDetail::new::<UserHeader>(TypeVariant::FixedSize);
         }
     }
 
@@ -806,14 +900,21 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
         settings: &static_config::pipeline::StaticConfig,
         attributes: &AttributeSpecifier,
     ) -> Result<
-        Vec<crate::service::port_factory::publish_subscribe::PortFactory<ServiceType, [Payload], ()>>,
+        Vec<
+            crate::service::port_factory::publish_subscribe::PortFactory<
+                ServiceType,
+                [Payload],
+                UserHeader,
+            >,
+        >,
         PipelineCreateError,
     > {
         let mut edges = Vec::with_capacity(settings.number_of_stages() + 1);
 
         for edge_index in 0..=settings.number_of_stages() {
-            let edge_service_name = Self::edge_service_name(self.base.service_config.name(), edge_index)
-                .map_err(PipelineCreateError::InvalidConfiguration)?;
+            let edge_service_name =
+                Self::edge_service_name(self.base.service_config.name(), edge_index)
+                    .map_err(PipelineCreateError::InvalidConfiguration)?;
             let stage = self.maybe_apply_payload_type_override(
                 self.configure_edge_builder::<[Payload]>(&edge_service_name, settings),
             );
@@ -831,14 +932,21 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
         settings: &static_config::pipeline::StaticConfig,
         verifier: &AttributeVerifier,
     ) -> Result<
-        Vec<crate::service::port_factory::publish_subscribe::PortFactory<ServiceType, [Payload], ()>>,
+        Vec<
+            crate::service::port_factory::publish_subscribe::PortFactory<
+                ServiceType,
+                [Payload],
+                UserHeader,
+            >,
+        >,
         PipelineOpenError,
     > {
         let mut edges = Vec::with_capacity(settings.number_of_stages() + 1);
 
         for edge_index in 0..=settings.number_of_stages() {
-            let edge_service_name = Self::edge_service_name(self.base.service_config.name(), edge_index)
-                .map_err(PipelineOpenError::InvalidConfiguration)?;
+            let edge_service_name =
+                Self::edge_service_name(self.base.service_config.name(), edge_index)
+                    .map_err(PipelineOpenError::InvalidConfiguration)?;
             let stage = self.maybe_apply_payload_type_override(
                 self.configure_edge_builder::<[Payload]>(&edge_service_name, settings),
             );
@@ -856,30 +964,47 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
         settings: &static_config::pipeline::StaticConfig,
         verifier: &AttributeVerifier,
     ) -> Result<
-        Vec<crate::service::port_factory::publish_subscribe::PortFactory<ServiceType, [Payload], ()>>,
+        Vec<
+            crate::service::port_factory::publish_subscribe::PortFactory<
+                ServiceType,
+                [Payload],
+                UserHeader,
+            >,
+        >,
         PipelineOpenOrCreateError,
     > {
         let mut edges = Vec::with_capacity(settings.number_of_stages() + 1);
 
         for edge_index in 0..=settings.number_of_stages() {
-            let edge_service_name = Self::edge_service_name(self.base.service_config.name(), edge_index)
-                .map_err(|e| PipelineOpenOrCreateError::PipelineCreateError(PipelineCreateError::InvalidConfiguration(e)))?;
+            let edge_service_name =
+                Self::edge_service_name(self.base.service_config.name(), edge_index).map_err(
+                    |e| {
+                        PipelineOpenOrCreateError::PipelineCreateError(
+                            PipelineCreateError::InvalidConfiguration(e),
+                        )
+                    },
+                )?;
             let stage = self.maybe_apply_payload_type_override(
                 self.configure_edge_builder::<[Payload]>(&edge_service_name, settings),
             );
-            let edge_factory = stage
-                .open_or_create_with_attributes(verifier)
-                .map_err(|e| match e {
-                    PublishSubscribeOpenOrCreateError::PublishSubscribeOpenError(v) => {
-                        PipelineOpenOrCreateError::PipelineOpenError(PipelineOpenError::EdgeFailure(v))
-                    }
-                    PublishSubscribeOpenOrCreateError::PublishSubscribeCreateError(v) => {
-                        PipelineOpenOrCreateError::PipelineCreateError(PipelineCreateError::EdgeFailure(v))
-                    }
-                    PublishSubscribeOpenOrCreateError::SystemInFlux => {
-                        PipelineOpenOrCreateError::SystemInFlux
-                    }
-                })?;
+            let edge_factory =
+                stage
+                    .open_or_create_with_attributes(verifier)
+                    .map_err(|e| match e {
+                        PublishSubscribeOpenOrCreateError::PublishSubscribeOpenError(v) => {
+                            PipelineOpenOrCreateError::PipelineOpenError(
+                                PipelineOpenError::EdgeFailure(v),
+                            )
+                        }
+                        PublishSubscribeOpenOrCreateError::PublishSubscribeCreateError(v) => {
+                            PipelineOpenOrCreateError::PipelineCreateError(
+                                PipelineCreateError::EdgeFailure(v),
+                            )
+                        }
+                        PublishSubscribeOpenOrCreateError::SystemInFlux => {
+                            PipelineOpenOrCreateError::SystemInFlux
+                        }
+                    })?;
             edges.push(edge_factory);
         }
 
@@ -889,7 +1014,8 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     /// Opens an existing pipeline service chain or creates it when missing.
     pub fn open_or_create(
         self,
-    ) -> Result<pipeline::PortFactory<ServiceType, [Payload]>, PipelineOpenOrCreateError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, [Payload], UserHeader>, PipelineOpenOrCreateError>
+    {
         self.open_or_create_with_attributes(&AttributeVerifier::new())
     }
 
@@ -897,7 +1023,8 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     pub fn open_or_create_with_attributes(
         mut self,
         verifier: &AttributeVerifier,
-    ) -> Result<pipeline::PortFactory<ServiceType, [Payload]>, PipelineOpenOrCreateError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, [Payload], UserHeader>, PipelineOpenOrCreateError>
+    {
         self.prepare();
         self.prepare_config_details();
 
@@ -911,7 +1038,7 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     /// Opens an existing pipeline service chain.
     pub fn open(
         self,
-    ) -> Result<pipeline::PortFactory<ServiceType, [Payload]>, PipelineOpenError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, [Payload], UserHeader>, PipelineOpenError> {
         self.open_with_attributes(&AttributeVerifier::new())
     }
 
@@ -919,7 +1046,7 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     pub fn open_with_attributes(
         mut self,
         verifier: &AttributeVerifier,
-    ) -> Result<pipeline::PortFactory<ServiceType, [Payload]>, PipelineOpenError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, [Payload], UserHeader>, PipelineOpenError> {
         self.prepare();
         self.prepare_config_details();
 
@@ -933,7 +1060,8 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     /// Creates a new pipeline service chain.
     pub fn create(
         self,
-    ) -> Result<pipeline::PortFactory<ServiceType, [Payload]>, PipelineCreateError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, [Payload], UserHeader>, PipelineCreateError>
+    {
         self.create_with_attributes(&AttributeSpecifier::new())
     }
 
@@ -941,7 +1069,8 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     pub fn create_with_attributes(
         mut self,
         attributes: &AttributeSpecifier,
-    ) -> Result<pipeline::PortFactory<ServiceType, [Payload]>, PipelineCreateError> {
+    ) -> Result<pipeline::PortFactory<ServiceType, [Payload], UserHeader>, PipelineCreateError>
+    {
         self.prepare();
         self.prepare_config_details();
 
@@ -953,10 +1082,22 @@ impl<Payload: Debug + ZeroCopySend + 'static, ServiceType: service::Service>
     }
 }
 
-impl<ServiceType: service::Service> Builder<[CustomPayloadMarker], ServiceType> {
+impl<ServiceType: service::Service, UserHeader: Debug + ZeroCopySend>
+    Builder<[CustomPayloadMarker], ServiceType, UserHeader>
+{
     #[doc(hidden)]
     pub unsafe fn __internal_set_payload_type_details(mut self, value: &TypeDetail) -> Self {
         self.override_payload_type = Some(*value);
+        self
+    }
+}
+
+impl<Payload: Debug + ZeroCopySend + ?Sized, ServiceType: service::Service>
+    Builder<Payload, ServiceType, CustomHeaderMarker>
+{
+    #[doc(hidden)]
+    pub unsafe fn __internal_set_user_header_type_details(mut self, value: &TypeDetail) -> Self {
+        self.override_user_header_type = Some(*value);
         self
     }
 }

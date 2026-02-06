@@ -35,20 +35,27 @@ use crate::service::port_factory::publish_subscribe;
 use crate::service::port_factory::{nodes, PortFactory as _};
 use crate::service::service_id::ServiceId;
 use crate::service::service_name::ServiceName;
-use crate::service::{dynamic_config, static_config, NoResource, ServiceState};
 use crate::service::Service;
+use crate::service::{dynamic_config, static_config, NoResource, ServiceState};
 
 #[derive(Debug)]
 /// Pipeline factory built from a fixed chain of internal publish-subscribe edges.
-pub struct PortFactory<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> {
+pub struct PortFactory<
+    ServiceType: Service,
+    Payload: Debug + ZeroCopySend + ?Sized + 'static,
+    UserHeader: Debug + ZeroCopySend + 'static = (),
+> {
     pub(crate) service: Arc<ServiceState<ServiceType, NoResource>>,
     number_of_stages: usize,
     initial_max_slice_len: usize,
-    edges: Vec<publish_subscribe::PortFactory<ServiceType, Payload, ()>>,
+    edges: Vec<publish_subscribe::PortFactory<ServiceType, Payload, UserHeader>>,
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
-    crate::service::port_factory::PortFactory for PortFactory<ServiceType, Payload>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + ?Sized + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > crate::service::port_factory::PortFactory for PortFactory<ServiceType, Payload, UserHeader>
 {
     type Service = ServiceType;
     type StaticConfig = static_config::pipeline::StaticConfig;
@@ -86,12 +93,15 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
     }
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
-    PortFactory<ServiceType, Payload>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + ?Sized + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > PortFactory<ServiceType, Payload, UserHeader>
 {
     pub(crate) fn new(
         service: ServiceState<ServiceType, NoResource>,
-        edges: Vec<publish_subscribe::PortFactory<ServiceType, Payload, ()>>,
+        edges: Vec<publish_subscribe::PortFactory<ServiceType, Payload, UserHeader>>,
     ) -> Self {
         let number_of_stages = service.static_config.pipeline().number_of_stages();
         let initial_max_slice_len = service.static_config.pipeline().initial_max_slice_len();
@@ -110,17 +120,20 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
     }
 
     /// Returns a builder for ingress endpoints.
-    pub fn ingress_builder(&self) -> IngressBuilder<'_, ServiceType, Payload> {
+    pub fn ingress_builder(&self) -> IngressBuilder<'_, ServiceType, Payload, UserHeader> {
         IngressBuilder::new(self)
     }
 
     /// Returns a builder for workers assigned to a stage.
-    pub fn worker_builder(&self, stage_id: usize) -> WorkerBuilder<'_, ServiceType, Payload> {
+    pub fn worker_builder(
+        &self,
+        stage_id: usize,
+    ) -> WorkerBuilder<'_, ServiceType, Payload, UserHeader> {
         WorkerBuilder::new(self, stage_id)
     }
 
     /// Returns a builder for egress endpoints.
-    pub fn egress_builder(&self) -> EgressBuilder<'_, ServiceType, Payload> {
+    pub fn egress_builder(&self) -> EgressBuilder<'_, ServiceType, Payload, UserHeader> {
         EgressBuilder::new(self)
     }
 
@@ -243,22 +256,32 @@ impl core::error::Error for WorkerReceiveError {}
 
 #[derive(Debug)]
 /// Ingress endpoint.
-pub struct Ingress<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> {
-    publisher: Publisher<ServiceType, Payload, ()>,
+pub struct Ingress<
+    ServiceType: Service,
+    Payload: Debug + ZeroCopySend + ?Sized + 'static,
+    UserHeader: Debug + ZeroCopySend + 'static = (),
+> {
+    publisher: Publisher<ServiceType, Payload, UserHeader>,
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> core::ops::Deref
-    for Ingress<ServiceType, Payload>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + ?Sized + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > core::ops::Deref for Ingress<ServiceType, Payload, UserHeader>
 {
-    type Target = Publisher<ServiceType, Payload, ()>;
+    type Target = Publisher<ServiceType, Payload, UserHeader>;
 
     fn deref(&self) -> &Self::Target {
         &self.publisher
     }
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> core::ops::DerefMut
-    for Ingress<ServiceType, Payload>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + ?Sized + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > core::ops::DerefMut for Ingress<ServiceType, Payload, UserHeader>
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.publisher
@@ -267,14 +290,21 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> cor
 
 #[derive(Debug)]
 /// Egress endpoint.
-pub struct Egress<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> {
-    subscriber: Subscriber<ServiceType, Payload, ()>,
+pub struct Egress<
+    ServiceType: Service,
+    Payload: Debug + ZeroCopySend + ?Sized + 'static,
+    UserHeader: Debug + ZeroCopySend + 'static = (),
+> {
+    subscriber: Subscriber<ServiceType, Payload, UserHeader>,
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> core::ops::Deref
-    for Egress<ServiceType, Payload>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + ?Sized + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > core::ops::Deref for Egress<ServiceType, Payload, UserHeader>
 {
-    type Target = Subscriber<ServiceType, Payload, ()>;
+    type Target = Subscriber<ServiceType, Payload, UserHeader>;
 
     fn deref(&self) -> &Self::Target {
         &self.subscriber
@@ -283,24 +313,45 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> cor
 
 #[derive(Debug)]
 /// Worker endpoint.
-pub struct Worker<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> {
-    subscriber: Subscriber<ServiceType, Payload, ()>,
-    publisher: Publisher<ServiceType, Payload, ()>,
+pub struct Worker<
+    ServiceType: Service,
+    Payload: Debug + ZeroCopySend + ?Sized + 'static,
+    UserHeader: Debug + ZeroCopySend + 'static = (),
+> {
+    subscriber: Subscriber<ServiceType, Payload, UserHeader>,
+    publisher: Publisher<ServiceType, Payload, UserHeader>,
 }
 
 #[derive(Debug)]
 /// Mutable work item created from a worker receive operation.
 #[must_use = "Work must be sent or explicitly discarded."]
-pub struct WorkMut<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static> {
-    sample: SampleMut<ServiceType, Payload, ()>,
+pub struct WorkMut<
+    ServiceType: Service,
+    Payload: Debug + ZeroCopySend + ?Sized + 'static,
+    UserHeader: Debug + ZeroCopySend + 'static = (),
+> {
+    sample: SampleMut<ServiceType, Payload, UserHeader>,
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
-    WorkMut<ServiceType, Payload>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + ?Sized + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > WorkMut<ServiceType, Payload, UserHeader>
 {
     /// Returns a mutable payload reference.
     pub fn payload_mut(&mut self) -> &mut Payload {
         self.sample.payload_mut()
+    }
+
+    /// Returns a mutable user header reference.
+    pub fn user_header_mut(&mut self) -> &mut UserHeader {
+        self.sample.user_header_mut()
+    }
+
+    /// Returns the user header reference.
+    pub fn user_header(&self) -> &UserHeader {
+        self.sample.user_header()
     }
 
     /// Sends the updated payload to the next stage.
@@ -318,18 +369,23 @@ pub struct IngressBuilder<
     'factory,
     ServiceType: Service,
     Payload: Debug + ZeroCopySend + ?Sized + 'static,
+    UserHeader: Debug + ZeroCopySend + 'static = (),
 > {
-    factory: &'factory PortFactory<ServiceType, Payload>,
+    factory: &'factory PortFactory<ServiceType, Payload, UserHeader>,
     max_loaned_samples: Option<usize>,
     unable_to_deliver_strategy: Option<UnableToDeliverStrategy>,
     initial_max_slice_len: usize,
     allocation_strategy: AllocationStrategy,
 }
 
-impl<'factory, ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
-    IngressBuilder<'factory, ServiceType, Payload>
+impl<
+        'factory,
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + ?Sized + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > IngressBuilder<'factory, ServiceType, Payload, UserHeader>
 {
-    fn new(factory: &'factory PortFactory<ServiceType, Payload>) -> Self {
+    fn new(factory: &'factory PortFactory<ServiceType, Payload, UserHeader>) -> Self {
         Self {
             factory,
             max_loaned_samples: None,
@@ -352,11 +408,14 @@ impl<'factory, ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 's
     }
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
-    IngressBuilder<'_, ServiceType, Payload>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > IngressBuilder<'_, ServiceType, Payload, UserHeader>
 {
     /// Creates the ingress endpoint.
-    pub fn create(self) -> Result<Ingress<ServiceType, Payload>, IngressCreateError> {
+    pub fn create(self) -> Result<Ingress<ServiceType, Payload, UserHeader>, IngressCreateError> {
         let mut builder = self.factory.edges[0].publisher_builder();
         if let Some(value) = self.max_loaned_samples {
             builder = builder.max_loaned_samples(value);
@@ -372,8 +431,11 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
     }
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
-    IngressBuilder<'_, ServiceType, [Payload]>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > IngressBuilder<'_, ServiceType, [Payload], UserHeader>
 {
     /// Sets the maximum dynamic slice length.
     pub fn initial_max_slice_len(mut self, value: usize) -> Self {
@@ -388,7 +450,7 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
     }
 
     /// Creates the ingress endpoint.
-    pub fn create(self) -> Result<Ingress<ServiceType, [Payload]>, IngressCreateError> {
+    pub fn create(self) -> Result<Ingress<ServiceType, [Payload], UserHeader>, IngressCreateError> {
         let mut builder = self.factory.edges[0].publisher_builder();
         if let Some(value) = self.max_loaned_samples {
             builder = builder.max_loaned_samples(value);
@@ -414,8 +476,9 @@ pub struct WorkerBuilder<
     'factory,
     ServiceType: Service,
     Payload: Debug + ZeroCopySend + ?Sized + 'static,
+    UserHeader: Debug + ZeroCopySend + 'static = (),
 > {
-    factory: &'factory PortFactory<ServiceType, Payload>,
+    factory: &'factory PortFactory<ServiceType, Payload, UserHeader>,
     stage_id: usize,
     max_loaned_samples: Option<usize>,
     unable_to_deliver_strategy: Option<UnableToDeliverStrategy>,
@@ -423,10 +486,17 @@ pub struct WorkerBuilder<
     allocation_strategy: AllocationStrategy,
 }
 
-impl<'factory, ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
-    WorkerBuilder<'factory, ServiceType, Payload>
+impl<
+        'factory,
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + ?Sized + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > WorkerBuilder<'factory, ServiceType, Payload, UserHeader>
 {
-    fn new(factory: &'factory PortFactory<ServiceType, Payload>, stage_id: usize) -> Self {
+    fn new(
+        factory: &'factory PortFactory<ServiceType, Payload, UserHeader>,
+        stage_id: usize,
+    ) -> Self {
         Self {
             factory,
             stage_id,
@@ -450,11 +520,14 @@ impl<'factory, ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 's
     }
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
-    WorkerBuilder<'_, ServiceType, Payload>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > WorkerBuilder<'_, ServiceType, Payload, UserHeader>
 {
     /// Creates the worker endpoint.
-    pub fn create(self) -> Result<Worker<ServiceType, Payload>, WorkerCreateError> {
+    pub fn create(self) -> Result<Worker<ServiceType, Payload, UserHeader>, WorkerCreateError> {
         if self.stage_id >= self.factory.number_of_stages {
             return Err(WorkerCreateError::StageOutOfBounds);
         }
@@ -483,8 +556,11 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
     }
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
-    WorkerBuilder<'_, ServiceType, [Payload]>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > WorkerBuilder<'_, ServiceType, [Payload], UserHeader>
 {
     /// Sets the maximum dynamic slice length.
     pub fn initial_max_slice_len(mut self, value: usize) -> Self {
@@ -499,7 +575,7 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
     }
 
     /// Creates the worker endpoint.
-    pub fn create(self) -> Result<Worker<ServiceType, [Payload]>, WorkerCreateError> {
+    pub fn create(self) -> Result<Worker<ServiceType, [Payload], UserHeader>, WorkerCreateError> {
         if self.stage_id >= self.factory.number_of_stages {
             return Err(WorkerCreateError::StageOutOfBounds);
         }
@@ -530,9 +606,16 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
     }
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static> Worker<ServiceType, Payload> {
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + 'static,
+        UserHeader: Default + Debug + ZeroCopySend + 'static,
+    > Worker<ServiceType, Payload, UserHeader>
+{
     /// Receives the next sample for this stage, prepares mutable output and returns it.
-    pub fn receive(&self) -> Result<Option<WorkMut<ServiceType, Payload>>, WorkerReceiveError> {
+    pub fn receive(
+        &self,
+    ) -> Result<Option<WorkMut<ServiceType, Payload, UserHeader>>, WorkerReceiveError> {
         let incoming = self
             .subscriber
             .receive()
@@ -548,6 +631,11 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static> Worker<Servi
 
         unsafe {
             core::ptr::copy_nonoverlapping(
+                incoming.user_header() as *const UserHeader,
+                outgoing.user_header_mut() as *mut UserHeader,
+                1,
+            );
+            core::ptr::copy_nonoverlapping(
                 incoming.payload() as *const Payload,
                 outgoing.payload_mut().as_mut_ptr(),
                 1,
@@ -559,9 +647,16 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static> Worker<Servi
     }
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static> Worker<ServiceType, [Payload]> {
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + 'static,
+        UserHeader: Default + Debug + ZeroCopySend + 'static,
+    > Worker<ServiceType, [Payload], UserHeader>
+{
     /// Receives the next sample for this stage, prepares mutable output and returns it.
-    pub fn receive(&self) -> Result<Option<WorkMut<ServiceType, [Payload]>>, WorkerReceiveError> {
+    pub fn receive(
+        &self,
+    ) -> Result<Option<WorkMut<ServiceType, [Payload], UserHeader>>, WorkerReceiveError> {
         let incoming = self
             .subscriber
             .receive()
@@ -577,6 +672,11 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static> Worker<Servi
             .map_err(WorkerReceiveError::LoanFailure)?;
 
         unsafe {
+            core::ptr::copy_nonoverlapping(
+                incoming.user_header() as *const UserHeader,
+                outgoing.user_header_mut() as *mut UserHeader,
+                1,
+            );
             core::ptr::copy_nonoverlapping(
                 incoming_payload.as_ptr(),
                 outgoing.payload_mut().as_mut_ptr() as *mut Payload,
@@ -595,23 +695,31 @@ pub struct EgressBuilder<
     'factory,
     ServiceType: Service,
     Payload: Debug + ZeroCopySend + ?Sized + 'static,
+    UserHeader: Debug + ZeroCopySend + 'static = (),
 > {
-    factory: &'factory PortFactory<ServiceType, Payload>,
+    factory: &'factory PortFactory<ServiceType, Payload, UserHeader>,
 }
 
-impl<'factory, ServiceType: Service, Payload: Debug + ZeroCopySend + ?Sized + 'static>
-    EgressBuilder<'factory, ServiceType, Payload>
+impl<
+        'factory,
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + ?Sized + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > EgressBuilder<'factory, ServiceType, Payload, UserHeader>
 {
-    fn new(factory: &'factory PortFactory<ServiceType, Payload>) -> Self {
+    fn new(factory: &'factory PortFactory<ServiceType, Payload, UserHeader>) -> Self {
         Self { factory }
     }
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
-    EgressBuilder<'_, ServiceType, Payload>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > EgressBuilder<'_, ServiceType, Payload, UserHeader>
 {
     /// Creates the egress endpoint.
-    pub fn create(self) -> Result<Egress<ServiceType, Payload>, EgressCreateError> {
+    pub fn create(self) -> Result<Egress<ServiceType, Payload, UserHeader>, EgressCreateError> {
         let subscriber = self.factory.edges[self.factory.number_of_stages]
             .subscriber_builder()
             .create()
@@ -620,11 +728,14 @@ impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
     }
 }
 
-impl<ServiceType: Service, Payload: Debug + ZeroCopySend + 'static>
-    EgressBuilder<'_, ServiceType, [Payload]>
+impl<
+        ServiceType: Service,
+        Payload: Debug + ZeroCopySend + 'static,
+        UserHeader: Debug + ZeroCopySend + 'static,
+    > EgressBuilder<'_, ServiceType, [Payload], UserHeader>
 {
     /// Creates the egress endpoint.
-    pub fn create(self) -> Result<Egress<ServiceType, [Payload]>, EgressCreateError> {
+    pub fn create(self) -> Result<Egress<ServiceType, [Payload], UserHeader>, EgressCreateError> {
         let subscriber = self.factory.edges[self.factory.number_of_stages]
             .subscriber_builder()
             .create()
