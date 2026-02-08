@@ -20,7 +20,6 @@ std = [
   "iceoryx2-bb-loggers/console",
   "iceoryx2-bb-concurrency/std",
   "iceoryx2-bb-posix/std",
-  "dep:crc32c",
 ]
 
 # The permissions of all resources will be set to read, write, execute for everyone.
@@ -53,7 +52,6 @@ iceoryx2-pal-configuration = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 tiny-fn = { workspace = true }
-crc32c = { workspace = true, optional = true }
 
 [dev-dependencies]
 iceoryx2-bb-loggers = { workspace = true }

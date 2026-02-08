@@ -14,7 +14,7 @@ use core::num::NonZeroUsize;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
-use iceoryx2::service::log_archive::{
+use iceoryx2_userland_log_archive::log_archive::{
     ArchiveRecorderBuilder, ArchiveReplayError, ArchiveReplayerBuilder, ChecksumMode,
     LogRecordInput, PersistenceMode, ReplayBudget, ARCHIVE_FILE_HEADER_V1_LEN,
 };

@@ -1,0 +1,22 @@
+[package]
+name = "iceoryx2-userland-log-archive"
+description = "iceoryx2: [internal] userland log archive recorder/replayer"
+categories = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+keywords = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+rust-version = { workspace = true }
+version = { workspace = true }
+
+[features]
+default = ["std"]
+std = ["dep:crc32c"]
+
+[dependencies]
+crc32c = { workspace = true, optional = true }
+
+[dev-dependencies]
+iceoryx2-bb-testing = { workspace = true }
+tempfile = { workspace = true }

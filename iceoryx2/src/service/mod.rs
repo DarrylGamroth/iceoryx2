@@ -209,9 +209,6 @@ pub mod dynamic_config;
 /// [`MessagingPattern`]s
 pub mod header;
 
-/// Archive file format contracts for the log recorder/replayer extension.
-pub mod log_archive;
-
 /// The messaging patterns with their custom
 /// [`StaticConfig`]
 pub mod messaging_pattern;

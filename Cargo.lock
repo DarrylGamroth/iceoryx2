@@ -1326,7 +1326,6 @@ dependencies = [
 name = "iceoryx2"
 version = "0.8.999"
 dependencies = [
- "crc32c",
  "iceoryx2-bb-concurrency",
  "iceoryx2-bb-container",
  "iceoryx2-bb-derive-macros",
@@ -1842,6 +1841,15 @@ dependencies = [
  "iceoryx2-tunnel-conformance-tests",
  "serde_json",
  "zenoh",
+]
+
+[[package]]
+name = "iceoryx2-userland-log-archive"
+version = "0.8.999"
+dependencies = [
+ "crc32c",
+ "iceoryx2-bb-testing",
+ "tempfile",
 ]
 
 [[package]]

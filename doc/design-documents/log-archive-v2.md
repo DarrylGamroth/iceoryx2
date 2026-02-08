@@ -775,7 +775,7 @@ let by_locator = replayer.read_at_locator(locator)?;
 
 **Exit Criteria**
 - All `LA2-P1-*` requirement IDs are `Covered` in `log-archive-v2-traceability.md`.
-- `cargo test -p iceoryx2 log_archive` passes, including recorder/replayer integration tests and recorder unit tests.
+- `cargo test -p iceoryx2-userland-log-archive -- --nocapture` passes, including recorder/replayer integration tests and recorder unit tests.
 - Deterministic out-of-space behavior is verified through fault-injection style tests (`ENOSPC` path) with explicit degraded/error state checks.
 - Metadata-log preallocation behavior is verified by tests that confirm replay correctness with preallocated zero-tail bytes.
 - Recorder stats/accounting fields are asserted in tests for payload/data/metadata bytes and amplification ratio behavior.
@@ -788,7 +788,7 @@ let by_locator = replayer.read_at_locator(locator)?;
 
 **Exit Criteria**
 - All `LA2-P2-*` requirement IDs are `Covered` in `log-archive-v2-traceability.md`.
-- `cargo test -p iceoryx2 log_archive` passes with sequence replay, locator replay, order-preserving `read_many_locators`, checksum validation, and replay budget tests.
+- `cargo test -p iceoryx2-userland-log-archive -- --nocapture` passes with sequence replay, locator replay, order-preserving `read_many_locators`, checksum validation, and replay budget tests.
 - Negative locator-path tests verify missing segment and frame-bounds/length mismatch handling with explicit errors.
 - Any replay-vs-ingest performance envelope requirement is explicitly deferred to Phase 6 hardening/performance gates.
 
