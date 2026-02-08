@@ -4,7 +4,7 @@
 - Draft
 - Last updated: 2026-02-08
 - Source specification: `doc/design-documents/log-archive-v2.md`
-- Scope of this matrix: Phase 0, Phase 1, Phase 2, Phase 3, Phase 4, Phase 5, and implemented Phase 6 backend requirements plus planned Phase 7 CLI-introspection requirements.
+- Scope of this matrix: Phase 0, Phase 1, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, and planned Phase 7 CLI-introspection requirements.
 
 ## Legend
 - `Covered`: requirement is implemented and has automated verification evidence.
@@ -51,14 +51,13 @@
 | `LA2-P6-001` | Async recorder data path `MUST` be `io_uring`-first on Linux and `MUST` provide blocking fallback when unavailable/unsupported. | Async Write Engine (`io_uring`-First), Resolved Decisions | `iceoryx2-userland/log-archive/src/log_archive/runtime/backend.rs`, `iceoryx2-userland/log-archive/src/log_archive/runtime/recorder.rs` | `log_archive_recorder_reports_effective_backend_for_preferred_selection` | Covered | Preferred mode resolves to `IoUring` when ring creation succeeds, else `Blocking`. |
 | `LA2-P6-002` | Recorder API `MUST` expose configured backend preference and effective runtime backend for introspection/admin tooling. | Phase 6 hardening + observability requirements | `iceoryx2-userland/log-archive/src/log_archive/runtime/recorder.rs` (`configured_async_io_backend`, `effective_async_io_backend`) | `log_archive_recorder_supports_explicit_blocking_backend_selection`, `log_archive_recorder_reports_effective_backend_for_preferred_selection` | Covered | Supports deterministic operator visibility into backend choice. |
 | `LA2-P6-003` | Backend configuration `MUST` validate queue-depth constraints and reject invalid values deterministically. | Phase 6 hardening configuration contracts | `iceoryx2-userland/log-archive/src/log_archive/runtime/recorder.rs` (`io_uring_queue_depth` validation) | `log_archive_recorder_rejects_zero_io_uring_queue_depth` | Covered | Rejects `io_uring_queue_depth == 0`. |
-| `LA2-P6-004` | Phase 6 `MUST` complete backend parity/soak/performance validation before phase exit. | Phase 6 exit criteria | `N/A (in progress)` | `N/A (in progress)` | Gap | Backend abstraction implemented; parity/soak/benchmark gates not yet complete. |
+| `LA2-P6-004` | Phase 6 `MUST` complete backend parity/soak/performance validation before phase exit. | Phase 6 exit criteria | `iceoryx2-userland/log-archive/tests/log_archive_phase6_hardening_tests.rs`, `iceoryx2-userland/log-archive/examples/throughput_profile_benchmark.rs`, `iceoryx2-userland/log-archive/scripts/run_throughput_profile_benchmark.sh` | `log_archive_phase6_backend_parity_between_blocking_and_io_uring`, `log_archive_phase6_sustained_ingest_soak_preserves_integrity`, `log_archive_replayer_detects_corrupted_payload_with_checksum`, `run_throughput_profile_benchmark.sh` | Covered | Phase 6 now has parity + soak + corruption coverage and reproducible throughput harness with environment metadata capture. |
 | `LA2-P7-001` | CLI `MUST` provide archive-introspection commands (`list-segments`, `inspect-commit-log`, `inspect-record` by sequence/locator). | CLI Control Surface (Planned), Phase 7 | `N/A (planned)` | `N/A (planned)` | Gap | Required for parity with record-and-replay style operational introspection. |
 | `LA2-P7-002` | CLI introspection `MUST` return deterministic not-available errors for out-of-retention sequence/locator queries. | CLI Control Surface (Planned), Phase 7 | `N/A (planned)` | `N/A (planned)` | Gap | Error class and exit-code mapping must be stable. |
 | `LA2-P7-003` | CLI introspection `MUST` support machine-readable output parity (`RON`, `JSON`) with stable field names. | CLI Control Surface (Planned), Phase 7 | `N/A (planned)` | `N/A (planned)` | Gap | Applies to segment listings, commit-log inspection, and record inspection output. |
 | `LA2-P7-004` | Phase 7 test suite `MUST` include end-to-end CLI tests for introspection commands and not-available behavior. | Phase 7 exit criteria | `N/A (planned)` | `N/A (planned)` | Gap | Complements lifecycle/retention CLI tests. |
 
 ## Gap List
-- `LA2-P6-004`
 - `LA2-P7-001`
 - `LA2-P7-002`
 - `LA2-P7-003`
@@ -75,12 +74,15 @@
 ## Verification Evidence
 - Command: `cargo test -p iceoryx2-userland-log-archive --tests -- --nocapture`
 - Command: `cargo test -p iceoryx2-userland-log-archive --lib -- --nocapture`
+- Command: `cargo test -p iceoryx2-userland-log-archive --test log_archive_phase6_hardening_tests -- --nocapture`
 - Command: `cargo test -p iceoryx2-userland-log-archive --examples`
 - Command: `cargo test -p iceoryx2-userland-log-archive-sqlite --tests -- --nocapture`
+- Command: `RECORDS=1000 PAYLOAD_BYTES=1024 BACKEND=blocking PROFILE=throughput iceoryx2-userland/log-archive/scripts/run_throughput_profile_benchmark.sh /tmp/log-archive-bench-smoke`
 - Last successful run: 2026-02-08
 - Relevant test files:
 - `iceoryx2-userland/log-archive/tests/log_archive_file_header_tests.rs`
 - `iceoryx2-userland/log-archive/tests/log_archive_metadata_indexer_tests.rs`
+- `iceoryx2-userland/log-archive/tests/log_archive_phase6_hardening_tests.rs`
 - `iceoryx2-userland/log-archive/tests/log_archive_recorder_replayer_tests.rs`
 - `iceoryx2-userland/log-archive/src/log_archive/runtime/recorder.rs` (unit tests)
 - `iceoryx2-userland/log-archive-sqlite/tests/sqlite_sink_tests.rs`

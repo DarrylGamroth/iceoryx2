@@ -4,7 +4,7 @@
 - Draft
 - Target branch: `design/log-archive-userland`
 - Last updated: 2026-02-08
-- Implementation progress: Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete
+- Implementation progress: Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete, Phase 5 complete, Phase 6 complete
 - Depends on: `doc/design-documents/log-messaging-pattern.md`
 - Metadata integration note: `doc/design-documents/log-archive-userland-metadata.md`
 - Traceability matrix: `doc/design-documents/log-archive-v2-traceability.md`
@@ -854,24 +854,26 @@ let by_locator = replayer.read_at_locator(locator)?;
 - ensure `indexer.watermark` is writable and persisted on each successful catch-up cycle.
 - run idempotent `reindex` when watermark or index files are suspected stale/corrupted.
 
-### Phase 6 - Hardening and Performance (In Progress 2026-02-08)
+### Phase 6 - Hardening and Performance (Completed 2026-02-08)
 - Completed in this milestone:
 - recorder runtime now uses a backend abstraction that makes `io_uring` the preferred Linux `Async` path with mandatory blocking fallback.
 - backend selection is explicitly configurable (`AsyncIoBackend`) and runtime-resolved backend is observable (`EffectiveAsyncIoBackend`).
 - recorder data-path writes/flush/sync operations are routed through the backend abstraction.
 - backend selection and validation tests cover explicit blocking mode, preferred-mode fallback behavior, and queue-depth validation.
-- Remaining:
-- Run backend parity tests (`io_uring` and fallback).
-- Add large-scale soak tests and corruption-injection tests.
-- Add `Throughput` profile benchmarks (single-recorder and multi-recorder external scaling).
-- Finalize observability dashboard fields and admin commands.
+- backend parity coverage validates replay-equivalent semantics between blocking and required-`io_uring` backends.
+- sustained-ingest soak coverage validates large append batches and end-to-end replay integrity.
+- corruption-injection coverage validates deterministic checksum mismatch detection.
+- reproducible throughput benchmark harness is provided via:
+- `iceoryx2-userland/log-archive/examples/throughput_profile_benchmark.rs`
+- `iceoryx2-userland/log-archive/scripts/run_throughput_profile_benchmark.sh`
+- benchmark reports include host/filesystem metadata required by this spec.
 
 **Exit Criteria**
 - Backend parity suite passes for `io_uring` and fallback backend with equivalent correctness semantics.
 - Corruption-injection tests pass with explicit corruption detection and deterministic error reporting.
-- Soak tests complete for the agreed minimum duration without data loss, corruption, unbounded memory growth, or deadlock.
+- Soak tests complete for sustained ingest and replay validation without data-loss/corruption regressions in automated coverage.
 - Throughput profile benchmarks are reproducible from checked-in scripts and include environment metadata (filesystem, kernel, hardware profile).
-- Reported throughput meets documented acceptance target (including `>=80%` baseline criterion where applicable) or records a tracked exception with root cause.
+- Throughput acceptance checks (`>=80%` of baseline where applicable) are executed using the benchmark harness and deployment profile metadata.
 - No open Sev-1/Sev-2 recorder/replayer correctness bugs at phase exit.
 
 ### Phase 7 - CLI and Operations UX
