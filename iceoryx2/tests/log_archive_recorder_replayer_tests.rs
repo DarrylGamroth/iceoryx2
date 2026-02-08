@@ -16,7 +16,7 @@ use std::io::{Seek, SeekFrom, Write};
 
 use iceoryx2::service::log_archive::{
     ArchiveRecorderBuilder, ArchiveReplayError, ArchiveReplayerBuilder, ChecksumMode,
-    LogRecordInput, PersistenceMode, ReplayBudget,
+    LogRecordInput, PersistenceMode, ReplayBudget, ARCHIVE_FILE_HEADER_V1_LEN,
 };
 use iceoryx2_bb_testing::assert_that;
 
@@ -243,6 +243,184 @@ fn log_archive_replayer_honors_replay_budget_limits() {
     replayer.seek(1);
     let batch = replayer.next_batch(NonZeroUsize::new(8).unwrap()).unwrap();
     assert_that!(batch.len(), eq 2);
+}
+
+#[test]
+fn log_archive_replayer_read_many_locators_preserves_input_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    let mut recorder = ArchiveRecorderBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .segment_bytes(2048)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .persistence_mode(PersistenceMode::Async)
+        .checksum_mode(ChecksumMode::Crc32c)
+        .create()
+        .unwrap();
+
+    let mut commits = Vec::new();
+    for sequence in 1..=5u64 {
+        commits.push(
+            recorder
+                .append_log_record(LogRecordInput {
+                    sequence,
+                    event_time_ns: sequence * 1000,
+                    user_header: &[0x11, 0x22],
+                    payload: &[sequence as u8; 12],
+                })
+                .unwrap(),
+        );
+    }
+    recorder.finalize().unwrap();
+
+    let replayer = ArchiveReplayerBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .open()
+        .unwrap();
+    let requested = vec![
+        commits[3].locator,
+        commits[0].locator,
+        commits[4].locator,
+        commits[1].locator,
+    ];
+    let replayed = replayer.read_many_locators(&requested).unwrap();
+
+    assert_that!(replayed.len(), eq requested.len());
+    assert_that!(replayed[0].sequence, eq 4);
+    assert_that!(replayed[1].sequence, eq 1);
+    assert_that!(replayed[2].sequence, eq 5);
+    assert_that!(replayed[3].sequence, eq 2);
+}
+
+#[test]
+fn log_archive_replayer_reports_missing_segment_for_invalid_locator() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    let mut recorder = ArchiveRecorderBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .segment_bytes(1024)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .persistence_mode(PersistenceMode::Async)
+        .checksum_mode(ChecksumMode::Crc32c)
+        .create()
+        .unwrap();
+    let commit = recorder
+        .append_log_record(LogRecordInput {
+            sequence: 1,
+            event_time_ns: 1,
+            user_header: &[1],
+            payload: &[2, 3, 4, 5],
+        })
+        .unwrap();
+    recorder.finalize().unwrap();
+
+    let replayer = ArchiveReplayerBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .open()
+        .unwrap();
+    let mut invalid = commit.locator;
+    invalid.segment_id = commit.locator.segment_id + 999;
+
+    let result = replayer.read_at_locator(invalid);
+    assert_that!(matches!(result, Err(ArchiveReplayError::MissingSegment(_))), eq true);
+}
+
+#[test]
+fn log_archive_replayer_reports_invalid_frame_length_for_locator_bounds_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    let mut recorder = ArchiveRecorderBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .segment_bytes(1024)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .persistence_mode(PersistenceMode::Async)
+        .checksum_mode(ChecksumMode::Crc32c)
+        .create()
+        .unwrap();
+    let commit = recorder
+        .append_log_record(LogRecordInput {
+            sequence: 1,
+            event_time_ns: 99,
+            user_header: &[0xAA],
+            payload: &[0xBB; 9],
+        })
+        .unwrap();
+    recorder.finalize().unwrap();
+
+    let replayer = ArchiveReplayerBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .open()
+        .unwrap();
+    let mut invalid = commit.locator;
+    invalid.frame_len += 8;
+
+    let result = replayer.read_at_locator(invalid);
+    assert_that!(
+        matches!(
+            result,
+            Err(ArchiveReplayError::InvalidFrameLength {
+                expected: _,
+                decoded: _
+            })
+        ),
+        eq true
+    );
+}
+
+#[test]
+fn log_archive_replayer_reads_entries_while_metadata_log_has_preallocated_zero_tail() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    let mut recorder = ArchiveRecorderBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .segment_bytes(2048)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .metadata_log_preallocate_entries(8)
+        .persistence_mode(PersistenceMode::Async)
+        .checksum_mode(ChecksumMode::Crc32c)
+        .create()
+        .unwrap();
+
+    for sequence in 1..=2u64 {
+        recorder
+            .append_log_record(LogRecordInput {
+                sequence,
+                event_time_ns: sequence,
+                user_header: &[0x10],
+                payload: &[0x22; 8],
+            })
+            .unwrap();
+    }
+    recorder.flush().unwrap();
+
+    let commit_log_len = std::fs::metadata(metadata_path.join("commit.idxlog"))
+        .unwrap()
+        .len() as usize;
+    let logical_bytes = ARCHIVE_FILE_HEADER_V1_LEN + (2 * 56);
+    assert_that!(commit_log_len > logical_bytes, eq true);
+
+    let replayer = ArchiveReplayerBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .open()
+        .unwrap();
+    let frames = replayer
+        .read_range(1, NonZeroUsize::new(8).unwrap())
+        .unwrap();
+    assert_that!(frames.len(), eq 2);
+    assert_that!(frames[0].sequence, eq 1);
+    assert_that!(frames[1].sequence, eq 2);
 }
 
 #[test]

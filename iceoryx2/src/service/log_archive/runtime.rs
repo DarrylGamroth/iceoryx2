@@ -53,6 +53,7 @@ const COMMIT_OFFSET_FRAME_LEN: usize = 48;
 const COMMIT_OFFSET_FRAME_CHECKSUM: usize = 52;
 
 const SEGMENT_SUMMARY_LEN: usize = 88;
+const DEFAULT_METADATA_LOG_PREALLOCATE_ENTRIES: usize = 4096;
 
 /// Durability mode of the archive recorder.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -306,6 +307,7 @@ pub struct ArchiveRecorderBuilder {
     segment_bytes: usize,
     segment_preallocate: bool,
     spare_preallocated_segments: usize,
+    metadata_log_preallocate_entries: usize,
     persistence_mode: PersistenceMode,
     checksum_mode: ChecksumMode,
     out_of_space_policy: OutOfSpacePolicy,
@@ -322,6 +324,7 @@ impl ArchiveRecorderBuilder {
             segment_bytes: 256 * 1024 * 1024,
             segment_preallocate: true,
             spare_preallocated_segments: 1,
+            metadata_log_preallocate_entries: DEFAULT_METADATA_LOG_PREALLOCATE_ENTRIES,
             persistence_mode: PersistenceMode::Async,
             checksum_mode: ChecksumMode::Crc32c,
             out_of_space_policy: OutOfSpacePolicy::FailWriter,
@@ -351,6 +354,12 @@ impl ArchiveRecorderBuilder {
     /// Configures number of spare preallocated segments.
     pub fn spare_preallocated_segments(mut self, value: usize) -> Self {
         self.spare_preallocated_segments = value;
+        self
+    }
+
+    /// Configures number of commit-log entries reserved in each metadata-log preallocation chunk.
+    pub fn metadata_log_preallocate_entries(mut self, value: usize) -> Self {
+        self.metadata_log_preallocate_entries = value;
         self
     }
 
@@ -392,6 +401,11 @@ impl ArchiveRecorderBuilder {
                 "segment_bytes is too small to store any frame",
             ));
         }
+        if self.metadata_log_preallocate_entries == 0 {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "metadata_log_preallocate_entries must be > 0",
+            ));
+        }
 
         let config = RecorderConfig {
             storage_path: self.storage_path.clone(),
@@ -402,6 +416,7 @@ impl ArchiveRecorderBuilder {
             segment_bytes: self.segment_bytes,
             segment_preallocate: self.segment_preallocate,
             spare_preallocated_segments: self.spare_preallocated_segments,
+            metadata_log_preallocate_entries: self.metadata_log_preallocate_entries,
             persistence_mode: self.persistence_mode,
             checksum_mode: self.checksum_mode,
             out_of_space_policy: self.out_of_space_policy,
@@ -473,6 +488,13 @@ impl ArchiveRecorderBuilder {
             0,
             0,
         )?;
+        let commit_log_write_offset = ARCHIVE_FILE_HEADER_V1_LEN as u64;
+        let commit_log_preallocated_len = preallocate_metadata_log(
+            &mut commit_log_file,
+            &commit_log_path,
+            commit_log_write_offset,
+            config.metadata_log_preallocate_entries,
+        )?;
 
         let mut recorder = ArchiveRecorder {
             config,
@@ -482,6 +504,8 @@ impl ArchiveRecorderBuilder {
                 commit_log_path,
                 catalog_file,
                 commit_log_file,
+                commit_log_write_offset,
+                commit_log_preallocated_len,
                 active_segment: None,
             }),
             stats: ArchiveRecorderStats::default(),
@@ -505,6 +529,7 @@ struct RecorderConfig {
     segment_bytes: usize,
     segment_preallocate: bool,
     spare_preallocated_segments: usize,
+    metadata_log_preallocate_entries: usize,
     persistence_mode: PersistenceMode,
     checksum_mode: ChecksumMode,
     out_of_space_policy: OutOfSpacePolicy,
@@ -519,6 +544,8 @@ struct DiskRecorderState {
     commit_log_path: PathBuf,
     catalog_file: File,
     commit_log_file: File,
+    commit_log_write_offset: u64,
+    commit_log_preallocated_len: u64,
     active_segment: Option<ActiveSegment>,
 }
 
@@ -658,6 +685,7 @@ impl ArchiveRecorder {
 
         if self.disk.is_some() {
             self.seal_active_segment_internal(false)?;
+            self.truncate_commit_log_to_logical_size()?;
             self.flush()?;
         }
 
@@ -775,24 +803,39 @@ impl ArchiveRecorder {
             return self.handle_write_failure(&segment_path, source);
         }
 
+        self.ensure_commit_log_capacity()?;
         let commit_log_path = self
             .disk
             .as_ref()
             .expect("disk recorder state must exist")
             .commit_log_path
             .clone();
-        let disk = self.disk.as_mut().expect("disk recorder state must exist");
-        write_commit_entry(
-            &mut disk.commit_log_file,
-            &commit_log_path,
-            CommitEntry {
-                commit_ordinal,
-                sequence: input.sequence,
-                locator,
-                frame_checksum: frame.checksum,
-            },
-        )
-        .map_err(|source| self.handle_commit_write_failure(source))?;
+        let write_offset = self
+            .disk
+            .as_ref()
+            .expect("disk recorder state must exist")
+            .commit_log_write_offset;
+        let write_result = {
+            let disk = self.disk.as_mut().expect("disk recorder state must exist");
+            write_commit_entry(
+                &mut disk.commit_log_file,
+                &commit_log_path,
+                write_offset,
+                CommitEntry {
+                    commit_ordinal,
+                    sequence: input.sequence,
+                    locator,
+                    frame_checksum: frame.checksum,
+                },
+            )
+        };
+        if let Err(source) = write_result {
+            return Err(self.handle_commit_write_failure(source));
+        }
+        self.disk
+            .as_mut()
+            .expect("disk recorder state must exist")
+            .commit_log_write_offset += COMMIT_ENTRY_LEN as u64;
 
         self.stats.committed_records += 1;
         self.stats.payload_bytes_committed += input.payload.len() as u64;
@@ -815,6 +858,28 @@ impl ArchiveRecorder {
         &mut self,
         source: ArchiveRecorderError,
     ) -> ArchiveRecorderError {
+        if let ArchiveRecorderError::Io {
+            operation,
+            path,
+            source,
+        } = source
+        {
+            if is_out_of_space(&source) {
+                self.stats.out_of_space_events += 1;
+                self.degraded = true;
+                return match self.config.out_of_space_policy {
+                    OutOfSpacePolicy::FailWriter => ArchiveRecorderError::OutOfSpace(path),
+                };
+            }
+
+            self.degraded = true;
+            return ArchiveRecorderError::Io {
+                operation,
+                path,
+                source,
+            };
+        }
+
         self.degraded = true;
         source
     }
@@ -840,6 +905,54 @@ impl ArchiveRecorder {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    fn ensure_commit_log_capacity(&mut self) -> Result<(), ArchiveRecorderError> {
+        let required = {
+            let disk = self.disk.as_ref().expect("disk recorder state must exist");
+            let required = disk.commit_log_write_offset + COMMIT_ENTRY_LEN as u64;
+            if required <= disk.commit_log_preallocated_len {
+                return Ok(());
+            }
+            required
+        };
+
+        let result = {
+            let disk = self.disk.as_mut().expect("disk recorder state must exist");
+            preallocate_metadata_log(
+                &mut disk.commit_log_file,
+                &disk.commit_log_path,
+                required,
+                self.config.metadata_log_preallocate_entries,
+            )
+        };
+        let preallocated_len = match result {
+            Ok(value) => value,
+            Err(source) => return Err(self.handle_commit_write_failure(source)),
+        };
+
+        let disk = self.disk.as_mut().expect("disk recorder state must exist");
+        if required <= disk.commit_log_preallocated_len {
+            return Ok(());
+        }
+        disk.commit_log_preallocated_len = preallocated_len;
+        Ok(())
+    }
+
+    fn truncate_commit_log_to_logical_size(&mut self) -> Result<(), ArchiveRecorderError> {
+        let Some(disk) = self.disk.as_mut() else {
+            return Ok(());
+        };
+
+        disk.commit_log_file
+            .set_len(disk.commit_log_write_offset)
+            .map_err(|source| ArchiveRecorderError::Io {
+                operation: "truncate commit idxlog to logical size",
+                path: disk.commit_log_path.clone(),
+                source,
+            })?;
+        disk.commit_log_preallocated_len = disk.commit_log_write_offset;
+        Ok(())
     }
 
     fn sync_data_files(&mut self) -> Result<(), ArchiveRecorderError> {
@@ -1509,6 +1622,7 @@ impl EncodedFrame {
 fn write_commit_entry(
     file: &mut File,
     commit_log_path: &Path,
+    write_offset: u64,
     entry: CommitEntry,
 ) -> Result<(), ArchiveRecorderError> {
     let mut bytes = [0u8; COMMIT_ENTRY_LEN];
@@ -1531,7 +1645,7 @@ fn write_commit_entry(
     bytes[COMMIT_OFFSET_FRAME_CHECKSUM..COMMIT_OFFSET_FRAME_CHECKSUM + 4]
         .copy_from_slice(&entry.frame_checksum.to_le_bytes());
 
-    file.seek(SeekFrom::End(0))
+    file.seek(SeekFrom::Start(write_offset))
         .map_err(|source| ArchiveRecorderError::Io {
             operation: "seek commit idxlog",
             path: commit_log_path.to_path_buf(),
@@ -1545,6 +1659,25 @@ fn write_commit_entry(
         })?;
 
     Ok(())
+}
+
+fn preallocate_metadata_log(
+    file: &mut File,
+    commit_log_path: &Path,
+    logical_end_offset: u64,
+    preallocate_entries: usize,
+) -> Result<u64, ArchiveRecorderError> {
+    let preallocate_bytes = (preallocate_entries.saturating_mul(COMMIT_ENTRY_LEN)) as u64;
+    let target_len = logical_end_offset.checked_add(preallocate_bytes).ok_or(
+        ArchiveRecorderError::InvalidConfiguration("metadata-log preallocation length overflow"),
+    )?;
+    file.set_len(target_len)
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "preallocate commit idxlog",
+            path: commit_log_path.to_path_buf(),
+            source,
+        })?;
+    Ok(target_len)
 }
 
 fn read_commit_entries(path: &Path) -> Result<Vec<CommitEntry>, ArchiveReplayError> {
@@ -1592,6 +1725,24 @@ fn read_commit_entries(path: &Path) -> Result<Vec<CommitEntry>, ArchiveReplayErr
                 source,
             })?;
         remaining -= COMMIT_ENTRY_LEN;
+        if bytes.iter().all(|byte| *byte == 0) {
+            if remaining == 0 {
+                break;
+            }
+            let mut tail = vec![0u8; remaining];
+            file.read_exact(&mut tail)
+                .map_err(|source| ArchiveReplayError::Io {
+                    operation: "read commit idxlog zero tail",
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            if tail.iter().any(|byte| *byte != 0) {
+                return Err(ArchiveReplayError::InvalidCommitEntry(
+                    "commit.idxlog contains non-zero bytes after zero-tail marker",
+                ));
+            }
+            break;
+        }
 
         let magic = [
             bytes[COMMIT_OFFSET_MAGIC],
@@ -1698,6 +1849,63 @@ fn align_up(value: usize, alignment: usize) -> usize {
 
 fn is_out_of_space(source: &std::io::Error) -> bool {
     source.raw_os_error() == Some(28)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn baseline_recorder_config() -> RecorderConfig {
+        RecorderConfig {
+            storage_path: PathBuf::from("/tmp/unused"),
+            metadata_log_path: PathBuf::from("/tmp/unused"),
+            segment_bytes: 1024,
+            segment_preallocate: true,
+            spare_preallocated_segments: 1,
+            metadata_log_preallocate_entries: DEFAULT_METADATA_LOG_PREALLOCATE_ENTRIES,
+            persistence_mode: PersistenceMode::Async,
+            checksum_mode: ChecksumMode::Crc32c,
+            out_of_space_policy: OutOfSpacePolicy::FailWriter,
+            log_id: [0u8; 16],
+            segment_generation: 0,
+        }
+    }
+
+    fn baseline_recorder() -> ArchiveRecorder {
+        ArchiveRecorder {
+            config: baseline_recorder_config(),
+            disk: None,
+            stats: ArchiveRecorderStats::default(),
+            next_commit_ordinal: 1,
+            last_sequence: None,
+            index_by_sequence: BTreeMap::new(),
+            volatile_records: Vec::new(),
+            finalized: false,
+            degraded: false,
+        }
+    }
+
+    #[test]
+    fn fail_writer_policy_marks_recorder_degraded_on_enospc() {
+        let mut recorder = baseline_recorder();
+        let path = Path::new("/tmp/segment-1-g0.data");
+
+        let result = recorder.handle_write_failure(path, std::io::Error::from_raw_os_error(28));
+        assert!(matches!(result, Err(ArchiveRecorderError::OutOfSpace(_))));
+        assert!(recorder.degraded);
+        assert_eq!(recorder.stats.out_of_space_events, 1);
+    }
+
+    #[test]
+    fn non_enospc_write_failures_return_io_error_and_mark_degraded() {
+        let mut recorder = baseline_recorder();
+        let path = Path::new("/tmp/segment-1-g0.data");
+
+        let result = recorder.handle_write_failure(path, std::io::Error::from_raw_os_error(5));
+        assert!(matches!(result, Err(ArchiveRecorderError::Io { .. })));
+        assert!(recorder.degraded);
+        assert_eq!(recorder.stats.out_of_space_events, 0);
+    }
 }
 
 fn lower_bound(values: &[u64], needle: u64) -> usize {
