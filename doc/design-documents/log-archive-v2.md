@@ -7,6 +7,7 @@
 - Implementation progress: Phase 0 complete, Phase 1 complete, Phase 2 complete
 - Depends on: `doc/design-documents/log-messaging-pattern.md`
 - Metadata integration note: `doc/design-documents/log-archive-userland-metadata.md`
+- Traceability matrix: `doc/design-documents/log-archive-v2-traceability.md`
 - Canonical plan/tracking document for archive implementation phases.
 
 ## Scope
@@ -344,7 +345,7 @@ Record conformance checks (mandatory):
 - Locator API (metadata-native): keyed by `(log_id, segment_id, segment_generation, file_offset, frame_len)`.
 - Replayer APIs `MUST` include:
 - `read_at_sequence(sequence)` (when sequence is available)
-- `read_range(sequence_start, sequence_end)` (when sequence is available)
+- `read_range(sequence_start, max_records)` (when sequence is available)
 - `seek(sequence)` plus linear `next()` (when sequence is available)
 - `read_at_locator(locator)`
 - `read_many_locators(&[locator])`
