@@ -13,12 +13,13 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Seek, SeekFrom, Write};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::log_archive::{ArchiveFileKind, ARCHIVE_FILE_HEADER_V1_LEN};
 
+use super::backend::RecorderIoBackend;
 use super::common::*;
 use super::storage::*;
 
@@ -31,6 +32,8 @@ pub struct ArchiveRecorderBuilder {
     spare_preallocated_segments: usize,
     metadata_log_preallocate_entries: usize,
     persistence_mode: PersistenceMode,
+    async_io_backend: AsyncIoBackend,
+    io_uring_queue_depth: u32,
     checksum_mode: ChecksumMode,
     out_of_space_policy: OutOfSpacePolicy,
     max_disk_bytes: Option<u64>,
@@ -49,6 +52,8 @@ impl ArchiveRecorderBuilder {
             spare_preallocated_segments: 1,
             metadata_log_preallocate_entries: DEFAULT_METADATA_LOG_PREALLOCATE_ENTRIES,
             persistence_mode: PersistenceMode::Async,
+            async_io_backend: AsyncIoBackend::IoUringPreferred,
+            io_uring_queue_depth: 256,
             checksum_mode: ChecksumMode::Crc32c,
             out_of_space_policy: OutOfSpacePolicy::FailWriter,
             max_disk_bytes: None,
@@ -90,6 +95,18 @@ impl ArchiveRecorderBuilder {
     /// Configures durability mode.
     pub fn persistence_mode(mut self, value: PersistenceMode) -> Self {
         self.persistence_mode = value;
+        self
+    }
+
+    /// Configures async data-path backend selection.
+    pub fn async_io_backend(mut self, value: AsyncIoBackend) -> Self {
+        self.async_io_backend = value;
+        self
+    }
+
+    /// Configures `io_uring` queue depth (Linux, when `IoUringPreferred` is used).
+    pub fn io_uring_queue_depth(mut self, value: u32) -> Self {
+        self.io_uring_queue_depth = value;
         self
     }
 
@@ -175,6 +192,11 @@ impl ArchiveRecorderBuilder {
                 ));
             }
         }
+        if self.io_uring_queue_depth == 0 {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "io_uring_queue_depth must be > 0",
+            ));
+        }
 
         Ok(RecorderConfig {
             storage_path: self.storage_path.clone(),
@@ -187,6 +209,8 @@ impl ArchiveRecorderBuilder {
             spare_preallocated_segments: self.spare_preallocated_segments,
             metadata_log_preallocate_entries: self.metadata_log_preallocate_entries,
             persistence_mode: self.persistence_mode,
+            async_io_backend: self.async_io_backend,
+            io_uring_queue_depth: self.io_uring_queue_depth,
             checksum_mode: self.checksum_mode,
             out_of_space_policy: self.out_of_space_policy,
             max_disk_bytes: self.max_disk_bytes,
@@ -197,8 +221,12 @@ impl ArchiveRecorderBuilder {
 }
 
 fn new_volatile_recorder(config: RecorderConfig) -> ArchiveRecorder {
+    let (io_backend, effective_async_io_backend) =
+        RecorderIoBackend::create(config.async_io_backend, config.io_uring_queue_depth);
     ArchiveRecorder {
         config,
+        io_backend,
+        effective_async_io_backend,
         disk: None,
         stats: ArchiveRecorderStats::default(),
         recovery_status: ArchiveRecoveryStatus::default(),
@@ -270,8 +298,13 @@ fn create_new_archive(config: RecorderConfig) -> Result<ArchiveRecorder, Archive
         config.metadata_log_preallocate_entries,
     )?;
 
+    let (io_backend, effective_async_io_backend) =
+        RecorderIoBackend::create(config.async_io_backend, config.io_uring_queue_depth);
+
     let mut recorder = ArchiveRecorder {
         config,
+        io_backend,
+        effective_async_io_backend,
         disk: Some(DiskRecorderState {
             segments_path,
             catalog_path,
@@ -414,8 +447,13 @@ fn recover_existing_archive(
             source,
         })?;
 
+    let (io_backend, effective_async_io_backend) =
+        RecorderIoBackend::create(config.async_io_backend, config.io_uring_queue_depth);
+
     let mut recorder = ArchiveRecorder {
         config: config.clone(),
+        io_backend,
+        effective_async_io_backend,
         disk: Some(DiskRecorderState {
             segments_path,
             catalog_path,
@@ -484,6 +522,16 @@ impl ArchiveRecorder {
     /// Returns effective persistence mode.
     pub fn persistence_mode(&self) -> PersistenceMode {
         self.config.persistence_mode
+    }
+
+    /// Returns configured async backend preference.
+    pub fn configured_async_io_backend(&self) -> AsyncIoBackend {
+        self.config.async_io_backend
+    }
+
+    /// Returns effective async backend selected at runtime.
+    pub fn effective_async_io_backend(&self) -> EffectiveAsyncIoBackend {
+        self.effective_async_io_backend
     }
 
     /// Returns effective segment size in bytes.
@@ -733,35 +781,31 @@ impl ArchiveRecorder {
     /// Flushes recorder output streams.
     pub fn flush(&mut self) -> Result<(), ArchiveRecorderError> {
         if let Some(disk) = self.disk.as_mut() {
+            let io_backend = &mut self.io_backend;
+
             if let Some(active) = disk.active_segment.as_mut() {
-                active
-                    .file
-                    .flush()
-                    .map_err(|source| ArchiveRecorderError::Io {
-                        operation: "flush active segment",
-                        path: segment_data_path(
-                            &disk.segments_path,
-                            active.segment_id,
-                            active.segment_generation,
-                        ),
-                        source,
-                    })?;
+                let segment_path = segment_data_path(
+                    &disk.segments_path,
+                    active.segment_id,
+                    active.segment_generation,
+                );
+                io_backend.flush(
+                    &mut active.file,
+                    &segment_path,
+                    "flush active segment",
+                )?;
             }
 
-            disk.commit_log_file
-                .flush()
-                .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "flush commit idxlog",
-                    path: disk.commit_log_path.clone(),
-                    source,
-                })?;
-            disk.catalog_file
-                .flush()
-                .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "flush catalog",
-                    path: disk.catalog_path.clone(),
-                    source,
-                })?;
+            io_backend.flush(
+                &mut disk.commit_log_file,
+                &disk.commit_log_path,
+                "flush commit idxlog",
+            )?;
+            io_backend.flush(
+                &mut disk.catalog_file,
+                &disk.catalog_path,
+                "flush catalog",
+            )?;
         }
 
         Ok(())
@@ -852,45 +896,58 @@ impl ArchiveRecorder {
             self.seal_active_segment_internal(true)?;
         }
 
-        let (locator, segment_path, write_failure) = {
+        let (locator, segment_path) = {
+            let disk = self.disk.as_ref().expect("disk recorder state must exist");
+            let active = disk
+                .active_segment
+                .as_ref()
+                .expect("active segment must exist");
+            (
+                ArchiveLocator {
+                    segment_id: active.segment_id,
+                    segment_generation: active.segment_generation,
+                    file_offset: active.write_offset,
+                    frame_len: frame.bytes.len() as u32,
+                },
+                segment_data_path(
+                    &disk.segments_path,
+                    active.segment_id,
+                    active.segment_generation,
+                ),
+            )
+        };
+
+        let write_result = {
+            let (io_backend, disk) = (
+                &mut self.io_backend,
+                self.disk.as_mut().expect("disk recorder state must exist"),
+            );
+            let active = disk
+                .active_segment
+                .as_mut()
+                .expect("active segment must exist");
+            io_backend.write_all_at(
+                &mut active.file,
+                &segment_path,
+                locator.file_offset,
+                &frame.bytes,
+                "write active segment",
+            )
+        };
+        if let Err(source) = write_result {
+            return Err(self.handle_commit_write_failure(source));
+        }
+
+        {
             let disk = self.disk.as_mut().expect("disk recorder state must exist");
             let active = disk
                 .active_segment
                 .as_mut()
                 .expect("active segment must exist");
-            let locator = ArchiveLocator {
-                segment_id: active.segment_id,
-                segment_generation: active.segment_generation,
-                file_offset: active.write_offset,
-                frame_len: frame.bytes.len() as u32,
-            };
-            let segment_path = segment_data_path(
-                &disk.segments_path,
-                active.segment_id,
-                active.segment_generation,
-            );
-
-            active
-                .file
-                .seek(SeekFrom::Start(locator.file_offset))
-                .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "seek active segment",
-                    path: segment_path.clone(),
-                    source,
-                })?;
-            let write_failure = active.file.write_all(&frame.bytes).err();
-            if write_failure.is_none() {
-                active.write_offset += frame.bytes.len() as u64;
-                active.sequence_start.get_or_insert(input.sequence);
-                active.sequence_end = Some(input.sequence);
-                active.records += 1;
-            }
-
-            (locator, segment_path, write_failure)
-        };
-
-        if let Some(source) = write_failure {
-            return self.handle_write_failure(&segment_path, source);
+            active.write_offset += frame.bytes.len() as u64;
+            active.sequence_start.get_or_insert(input.sequence);
+            active.sequence_end = Some(input.sequence);
+            active.records += 1;
         }
 
         self.ensure_commit_log_capacity()?;
@@ -905,18 +962,23 @@ impl ArchiveRecorder {
             .as_ref()
             .expect("disk recorder state must exist")
             .commit_log_write_offset;
+        let commit_entry_bytes = encode_commit_entry(CommitEntry {
+            commit_ordinal,
+            sequence: input.sequence,
+            locator,
+            frame_checksum: frame.checksum,
+        });
         let write_result = {
-            let disk = self.disk.as_mut().expect("disk recorder state must exist");
-            write_commit_entry(
+            let (io_backend, disk) = (
+                &mut self.io_backend,
+                self.disk.as_mut().expect("disk recorder state must exist"),
+            );
+            io_backend.write_all_at(
                 &mut disk.commit_log_file,
                 &commit_log_path,
                 write_offset,
-                CommitEntry {
-                    commit_ordinal,
-                    sequence: input.sequence,
-                    locator,
-                    frame_checksum: frame.checksum,
-                },
+                &commit_entry_bytes,
+                "append commit idxlog entry",
             )
         };
         if let Err(source) = write_result {
@@ -974,6 +1036,7 @@ impl ArchiveRecorder {
         source
     }
 
+    #[cfg(test)]
     fn handle_write_failure(
         &mut self,
         path: &Path,
@@ -1034,13 +1097,12 @@ impl ArchiveRecorder {
             return Ok(());
         };
 
-        disk.commit_log_file
-            .set_len(disk.commit_log_write_offset)
-            .map_err(|source| ArchiveRecorderError::Io {
-                operation: "truncate commit idxlog to logical size",
-                path: disk.commit_log_path.clone(),
-                source,
-            })?;
+        self.io_backend.set_len(
+            &mut disk.commit_log_file,
+            &disk.commit_log_path,
+            disk.commit_log_write_offset,
+            "truncate commit idxlog to logical size",
+        )?;
         disk.commit_log_preallocated_len = disk.commit_log_write_offset;
         Ok(())
     }
@@ -1396,25 +1458,22 @@ impl ArchiveRecorder {
         let target_write_offset = committed_write_offset.min(scan_result.valid_end);
         let mut truncated_bytes = 0u64;
         if scan_result.original_len > target_write_offset {
-            active.file.set_len(target_write_offset).map_err(|source| {
-                ArchiveRecorderError::Io {
-                    operation: "truncate active segment recovery tail",
-                    path: segment_path.clone(),
-                    source,
-                }
-            })?;
+            self.io_backend.set_len(
+                &mut active.file,
+                &segment_path,
+                target_write_offset,
+                "truncate active segment recovery tail",
+            )?;
             truncated_bytes = scan_result.original_len - target_write_offset;
         }
 
         if self.config.segment_preallocate {
-            active
-                .file
-                .set_len(self.config.segment_bytes as u64)
-                .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "re-preallocate active segment after recovery",
-                    path: segment_path.clone(),
-                    source,
-                })?;
+            self.io_backend.set_len(
+                &mut active.file,
+                &segment_path,
+                self.config.segment_bytes as u64,
+                "re-preallocate active segment after recovery",
+            )?;
         }
 
         active.write_offset = target_write_offset;
@@ -1427,34 +1486,29 @@ impl ArchiveRecorder {
 
     fn sync_data_files(&mut self) -> Result<(), ArchiveRecorderError> {
         let disk = self.disk.as_mut().expect("disk state must exist");
+        let io_backend = &mut self.io_backend;
         if let Some(active) = disk.active_segment.as_mut() {
-            active
-                .file
-                .sync_data()
-                .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "sync active segment",
-                    path: segment_data_path(
-                        &disk.segments_path,
-                        active.segment_id,
-                        active.segment_generation,
-                    ),
-                    source,
-                })?;
+            let segment_path = segment_data_path(
+                &disk.segments_path,
+                active.segment_id,
+                active.segment_generation,
+            );
+            io_backend.sync_data(
+                &mut active.file,
+                &segment_path,
+                "sync active segment",
+            )?;
         }
-        disk.commit_log_file
-            .sync_data()
-            .map_err(|source| ArchiveRecorderError::Io {
-                operation: "sync commit idxlog",
-                path: disk.commit_log_path.clone(),
-                source,
-            })?;
-        disk.catalog_file
-            .sync_data()
-            .map_err(|source| ArchiveRecorderError::Io {
-                operation: "sync catalog",
-                path: disk.catalog_path.clone(),
-                source,
-            })?;
+        io_backend.sync_data(
+            &mut disk.commit_log_file,
+            &disk.commit_log_path,
+            "sync commit idxlog",
+        )?;
+        io_backend.sync_data(
+            &mut disk.catalog_file,
+            &disk.catalog_path,
+            "sync catalog",
+        )?;
 
         Ok(())
     }
@@ -1495,12 +1549,12 @@ impl ArchiveRecorder {
         )?;
 
         if self.config.segment_preallocate {
-            file.set_len(self.config.segment_bytes as u64)
-                .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "preallocate active segment",
-                    path: segment_path.clone(),
-                    source,
-                })?;
+            self.io_backend.set_len(
+                &mut file,
+                &segment_path,
+                self.config.segment_bytes as u64,
+                "preallocate active segment",
+            )?;
 
             if created_new {
                 self.stats.preallocated_segments += 1;
@@ -1551,12 +1605,12 @@ impl ArchiveRecorder {
                 segment_id,
                 self.config.segment_generation,
             )?;
-            file.set_len(self.config.segment_bytes as u64)
-                .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "preallocate spare segment",
-                    path: path.clone(),
-                    source,
-                })?;
+            self.io_backend.set_len(
+                &mut file,
+                &path,
+                self.config.segment_bytes as u64,
+                "preallocate spare segment",
+            )?;
             self.stats.preallocated_segments += 1;
         }
 
@@ -1574,30 +1628,21 @@ impl ArchiveRecorder {
         };
 
         if self.config.persistence_mode != PersistenceMode::Volatile {
-            active
-                .file
-                .flush()
-                .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "flush segment before seal",
-                    path: segment_data_path(
-                        &disk.segments_path,
-                        active.segment_id,
-                        active.segment_generation,
-                    ),
-                    source,
-                })?;
-            active
-                .file
-                .sync_data()
-                .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "sync segment before seal",
-                    path: segment_data_path(
-                        &disk.segments_path,
-                        active.segment_id,
-                        active.segment_generation,
-                    ),
-                    source,
-                })?;
+            let segment_path = segment_data_path(
+                &disk.segments_path,
+                active.segment_id,
+                active.segment_generation,
+            );
+            self.io_backend.flush(
+                &mut active.file,
+                &segment_path,
+                "flush segment before seal",
+            )?;
+            self.io_backend.sync_data(
+                &mut active.file,
+                &segment_path,
+                "sync segment before seal",
+            )?;
         }
 
         if active.records > 0 {
@@ -1629,30 +1674,32 @@ impl ArchiveRecorder {
             )?;
 
             let summary_bytes = summary.to_bytes();
-            meta_file
-                .write_all(&summary_bytes)
-                .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "write segment summary",
-                    path: segment_meta_path.clone(),
-                    source,
-                })?;
+            self.io_backend.write_all_at(
+                &mut meta_file,
+                &segment_meta_path,
+                ARCHIVE_FILE_HEADER_V1_LEN as u64,
+                &summary_bytes,
+                "write segment summary",
+            )?;
             self.stats.metadata_bytes_written +=
                 ARCHIVE_FILE_HEADER_V1_LEN as u64 + summary_bytes.len() as u64;
 
-            disk.catalog_file.seek(SeekFrom::End(0)).map_err(|source| {
-                ArchiveRecorderError::Io {
-                    operation: "seek catalog",
-                    path: disk.catalog_path.clone(),
-                    source,
-                }
-            })?;
-            disk.catalog_file
-                .write_all(&summary_bytes)
+            let catalog_write_offset = disk
+                .catalog_file
+                .metadata()
                 .map_err(|source| ArchiveRecorderError::Io {
-                    operation: "append catalog segment summary",
+                    operation: "read catalog metadata",
                     path: disk.catalog_path.clone(),
                     source,
-                })?;
+                })?
+                .len();
+            self.io_backend.write_all_at(
+                &mut disk.catalog_file,
+                &disk.catalog_path,
+                catalog_write_offset,
+                &summary_bytes,
+                "append catalog segment summary",
+            )?;
             self.stats.metadata_bytes_written += summary_bytes.len() as u64;
             self.stats.rolled_segments += 1;
         }
@@ -1685,6 +1732,8 @@ mod tests {
             spare_preallocated_segments: 1,
             metadata_log_preallocate_entries: DEFAULT_METADATA_LOG_PREALLOCATE_ENTRIES,
             persistence_mode: PersistenceMode::Async,
+            async_io_backend: AsyncIoBackend::Blocking,
+            io_uring_queue_depth: 8,
             checksum_mode: ChecksumMode::Crc32c,
             out_of_space_policy: OutOfSpacePolicy::FailWriter,
             max_disk_bytes: None,
@@ -1694,8 +1743,12 @@ mod tests {
     }
 
     fn baseline_recorder() -> ArchiveRecorder {
+        let (io_backend, effective_async_io_backend) =
+            RecorderIoBackend::create(AsyncIoBackend::Blocking, 8);
         ArchiveRecorder {
             config: baseline_recorder_config(),
+            io_backend,
+            effective_async_io_backend,
             disk: None,
             stats: ArchiveRecorderStats::default(),
             recovery_status: ArchiveRecoveryStatus::default(),

@@ -17,6 +17,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::backend::RecorderIoBackend;
 use crate::log_archive::ArchiveFileHeaderError;
 
 pub(super) const FRAME_MAGIC: [u8; 4] = *b"LAR1";
@@ -59,6 +60,24 @@ pub enum PersistenceMode {
     Async,
     /// Persists data and enforces a per-append fsync barrier.
     Sync,
+}
+
+/// Async write backend selection for recorder data path.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AsyncIoBackend {
+    /// Prefer Linux `io_uring` and fall back to blocking file I/O when unavailable.
+    IoUringPreferred,
+    /// Always use blocking file I/O.
+    Blocking,
+}
+
+/// Effective async write backend selected by recorder runtime.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum EffectiveAsyncIoBackend {
+    /// Blocking file I/O backend.
+    Blocking,
+    /// Linux `io_uring` backend.
+    IoUring,
 }
 
 /// Checksum strategy for persisted frames.
@@ -402,6 +421,8 @@ pub(super) struct RecorderConfig {
     pub(super) spare_preallocated_segments: usize,
     pub(super) metadata_log_preallocate_entries: usize,
     pub(super) persistence_mode: PersistenceMode,
+    pub(super) async_io_backend: AsyncIoBackend,
+    pub(super) io_uring_queue_depth: u32,
     pub(super) checksum_mode: ChecksumMode,
     pub(super) out_of_space_policy: OutOfSpacePolicy,
     pub(super) max_disk_bytes: Option<u64>,
@@ -449,6 +470,8 @@ pub(super) struct VolatileFrame {
 #[derive(Debug)]
 pub struct ArchiveRecorder {
     pub(super) config: RecorderConfig,
+    pub(super) io_backend: RecorderIoBackend,
+    pub(super) effective_async_io_backend: EffectiveAsyncIoBackend,
     pub(super) disk: Option<DiskRecorderState>,
     pub(super) stats: ArchiveRecorderStats,
     pub(super) recovery_status: ArchiveRecoveryStatus,

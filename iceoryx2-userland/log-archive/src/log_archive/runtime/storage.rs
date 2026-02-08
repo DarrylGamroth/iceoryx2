@@ -21,12 +21,7 @@ use crate::log_archive::{ArchiveFileHeaderV1, ArchiveFileKind, ARCHIVE_FILE_HEAD
 
 use super::common::*;
 
-pub(super) fn write_commit_entry(
-    file: &mut File,
-    commit_log_path: &Path,
-    write_offset: u64,
-    entry: CommitEntry,
-) -> Result<(), ArchiveRecorderError> {
+pub(super) fn encode_commit_entry(entry: CommitEntry) -> [u8; COMMIT_ENTRY_LEN] {
     let mut bytes = [0u8; COMMIT_ENTRY_LEN];
     bytes[COMMIT_OFFSET_MAGIC..COMMIT_OFFSET_MAGIC + 4].copy_from_slice(&COMMIT_ENTRY_MAGIC);
     bytes[COMMIT_OFFSET_ENTRY_LEN..COMMIT_OFFSET_ENTRY_LEN + 2]
@@ -46,21 +41,7 @@ pub(super) fn write_commit_entry(
         .copy_from_slice(&entry.locator.frame_len.to_le_bytes());
     bytes[COMMIT_OFFSET_FRAME_CHECKSUM..COMMIT_OFFSET_FRAME_CHECKSUM + 4]
         .copy_from_slice(&entry.frame_checksum.to_le_bytes());
-
-    file.seek(SeekFrom::Start(write_offset))
-        .map_err(|source| ArchiveRecorderError::Io {
-            operation: "seek commit idxlog",
-            path: commit_log_path.to_path_buf(),
-            source,
-        })?;
-    file.write_all(&bytes)
-        .map_err(|source| ArchiveRecorderError::Io {
-            operation: "append commit idxlog entry",
-            path: commit_log_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    bytes
 }
 
 pub(super) fn preallocate_metadata_log(

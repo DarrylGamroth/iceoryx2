@@ -854,7 +854,13 @@ let by_locator = replayer.read_at_locator(locator)?;
 - ensure `indexer.watermark` is writable and persisted on each successful catch-up cycle.
 - run idempotent `reindex` when watermark or index files are suspected stale/corrupted.
 
-### Phase 6 - Hardening and Performance
+### Phase 6 - Hardening and Performance (In Progress 2026-02-08)
+- Completed in this milestone:
+- recorder runtime now uses a backend abstraction that makes `io_uring` the preferred Linux `Async` path with mandatory blocking fallback.
+- backend selection is explicitly configurable (`AsyncIoBackend`) and runtime-resolved backend is observable (`EffectiveAsyncIoBackend`).
+- recorder data-path writes/flush/sync operations are routed through the backend abstraction.
+- backend selection and validation tests cover explicit blocking mode, preferred-mode fallback behavior, and queue-depth validation.
+- Remaining:
 - Run backend parity tests (`io_uring` and fallback).
 - Add large-scale soak tests and corruption-injection tests.
 - Add `Throughput` profile benchmarks (single-recorder and multi-recorder external scaling).

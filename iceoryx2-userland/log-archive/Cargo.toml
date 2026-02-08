@@ -17,6 +17,9 @@ std = ["dep:crc32c"]
 [dependencies]
 crc32c = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7.3"
+
 [dev-dependencies]
 iceoryx2-bb-testing = { workspace = true }
 tempfile = { workspace = true }

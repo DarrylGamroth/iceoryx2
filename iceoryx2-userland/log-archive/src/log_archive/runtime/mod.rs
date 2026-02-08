@@ -10,6 +10,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+mod backend;
 mod common;
 mod metadata;
 mod recorder;

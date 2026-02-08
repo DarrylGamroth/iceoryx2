@@ -16,8 +16,9 @@ use std::io::{Seek, SeekFrom, Write};
 
 use iceoryx2_bb_testing::assert_that;
 use iceoryx2_userland_log_archive::log_archive::{
-    ArchiveRecorderBuilder, ArchiveReplayError, ArchiveReplayerBuilder, ArchiveSegmentTier,
-    ChecksumMode, LogRecordInput, PersistenceMode, ReplayBudget, ARCHIVE_FILE_HEADER_V1_LEN,
+    ArchiveRecorderBuilder, ArchiveRecorderError, ArchiveReplayError, ArchiveReplayerBuilder,
+    ArchiveSegmentTier, AsyncIoBackend, ChecksumMode, EffectiveAsyncIoBackend, LogRecordInput,
+    PersistenceMode, ReplayBudget, ARCHIVE_FILE_HEADER_V1_LEN,
 };
 
 #[test]
@@ -293,6 +294,93 @@ fn log_archive_replayer_read_many_locators_preserves_input_order() {
     assert_that!(replayed[1].sequence, eq 1);
     assert_that!(replayed[2].sequence, eq 5);
     assert_that!(replayed[3].sequence, eq 2);
+}
+
+#[test]
+fn log_archive_recorder_rejects_zero_io_uring_queue_depth() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+
+    let result = ArchiveRecorderBuilder::new(&storage_path)
+        .io_uring_queue_depth(0)
+        .create();
+
+    assert_that!(
+        matches!(
+            result,
+            Err(ArchiveRecorderError::InvalidConfiguration(
+                "io_uring_queue_depth must be > 0"
+            ))
+        ),
+        eq true
+    );
+}
+
+#[test]
+fn log_archive_recorder_supports_explicit_blocking_backend_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    let mut recorder = ArchiveRecorderBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .segment_bytes(1024)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .persistence_mode(PersistenceMode::Async)
+        .async_io_backend(AsyncIoBackend::Blocking)
+        .create()
+        .unwrap();
+
+    assert_that!(
+        recorder.configured_async_io_backend(),
+        eq AsyncIoBackend::Blocking
+    );
+    assert_that!(
+        recorder.effective_async_io_backend(),
+        eq EffectiveAsyncIoBackend::Blocking
+    );
+
+    recorder
+        .append_log_record(LogRecordInput {
+            sequence: 1,
+            event_time_ns: 1,
+            user_header: &[0xAA],
+            payload: &[0x01, 0x02, 0x03, 0x04],
+        })
+        .unwrap();
+    recorder.finalize().unwrap();
+}
+
+#[test]
+fn log_archive_recorder_reports_effective_backend_for_preferred_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+
+    let recorder = ArchiveRecorderBuilder::new(&storage_path)
+        .io_uring_queue_depth(1)
+        .create()
+        .unwrap();
+    assert_that!(
+        recorder.configured_async_io_backend(),
+        eq AsyncIoBackend::IoUringPreferred
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let expected = if io_uring::IoUring::new(1).is_ok() {
+            EffectiveAsyncIoBackend::IoUring
+        } else {
+            EffectiveAsyncIoBackend::Blocking
+        };
+        assert_that!(recorder.effective_async_io_backend(), eq expected);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert_that!(
+            recorder.effective_async_io_backend(),
+            eq EffectiveAsyncIoBackend::Blocking
+        );
+    }
 }
 
 #[test]
