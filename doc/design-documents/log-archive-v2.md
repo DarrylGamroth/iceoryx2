@@ -757,12 +757,11 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Freeze runtime defaults and replay-rate mode semantics.
 
 **Exit Criteria**
-- Format spec reviewed and accepted.
-- Golden binary fixtures committed.
-- Version-compatibility tests for major/minor and must-understand flags committed.
-- Ack-level and crash-contract conformance tests committed.
-- Pattern-adapter contract tests committed (log required; pub/sub and pipeline fixture compatibility).
-- Replay-rate conformance tests committed (`AsFastAsPossible`, paced modes).
+- All Phase 0 requirement IDs tracked in `log-archive-v2-traceability.md` are `Covered`; none are `Partial` or `Gap`.
+- Canonical binary header fixtures and decode/validation tests are committed and passing in CI.
+- Major/minor compatibility and must-understand flag behavior is covered by automated tests.
+- Format contracts are frozen at explicit major/minor values and incompatible changes require major bump plus migration note.
+- Any non-Phase-0 requirements are listed under deferred scope and are not counted as open Phase 0 gaps.
 
 ### Phase 1 - Recorder Core (Completed 2026-02-08)
 - Implement segment `.data` writer with aligned append.
@@ -775,10 +774,11 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Implement `log` pattern adapter on top of recorder core ingest contract.
 
 **Exit Criteria**
-- Crash-safe append+roll tests pass.
-- No unbounded allocation under sustained append.
-- Out-of-space behavior matches configured failure policy with explicit status/errors.
-- Log-adapter ingest conformance tests pass.
+- All `LA2-P1-*` requirement IDs are `Covered` in `log-archive-v2-traceability.md`.
+- `cargo test -p iceoryx2 log_archive` passes, including recorder/replayer integration tests and recorder unit tests.
+- Deterministic out-of-space behavior is verified through fault-injection style tests (`ENOSPC` path) with explicit degraded/error state checks.
+- Metadata-log preallocation behavior is verified by tests that confirm replay correctness with preallocated zero-tail bytes.
+- Recorder stats/accounting fields are asserted in tests for payload/data/metadata bytes and amplification ratio behavior.
 
 ### Phase 2 - Replayer Core (Completed 2026-02-08)
 - Implement sequence replay APIs (`read_at_sequence`, `read_range`, `seek/next`) for sequence-capable adapters.
@@ -787,9 +787,10 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Implement replay I/O budget controls required for ingest isolation.
 
 **Exit Criteria**
-- Replay API behavior tests pass.
-- Locator validation tests pass.
-- Recorder ingest throughput remains within configured degradation envelope under concurrent replay.
+- All `LA2-P2-*` requirement IDs are `Covered` in `log-archive-v2-traceability.md`.
+- `cargo test -p iceoryx2 log_archive` passes with sequence replay, locator replay, order-preserving `read_many_locators`, checksum validation, and replay budget tests.
+- Negative locator-path tests verify missing segment and frame-bounds/length mismatch handling with explicit errors.
+- Any replay-vs-ingest performance envelope requirement is explicitly deferred to Phase 6 hardening/performance gates.
 
 ### Phase 3 - Recovery and Checkpointing
 - Implement startup recovery:
@@ -799,8 +800,13 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Implement deterministic recovery metrics and admin status.
 
 **Exit Criteria**
-- Fault-injection crash matrix passes.
-- Recovery time envelope is measured and documented.
+- Recovery crash matrix is automated and passing for all supported persistence modes (`Volatile`, `Async`, `Sync`) across at least:
+- crash during append
+- crash during roll/seal
+- crash during commit-log write
+- Recovery validates prefix safety: no hole or reordering before reported durable boundary.
+- Recovery emits deterministic status fields (last durable sequence/ordinal, truncation events, degraded reason when applicable).
+- Recovery-time SLO evidence is captured and committed for multiple segment counts and retained byte sizes, with pass/fail against the documented formula.
 
 ### Phase 4 - Retention and Tier Arbitration
 - Implement global retention arbiter with size cap.
@@ -808,8 +814,11 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Enforce replay pin/snapshot constraints during trim.
 
 **Exit Criteria**
-- Retention determinism tests pass.
-- No invalid delete while pinned replay sessions exist.
+- Retention arbiter tests prove deterministic oldest-first behavior for equivalent inputs.
+- Attach/detach/delete lifecycle tests prove idempotency and correct state transitions across retries.
+- Replay pin/snapshot safety tests prove pinned segments are not deleted or detached in ways that violate replay contract.
+- Tier-state and retention outcomes are observable via admin status fields and verified by automated tests.
+- Capacity enforcement is verified under sustained ingest with deterministic policy behavior at/over watermarks.
 
 ### Phase 5 - Metadata Integration and Tooling
 - Publish metadata schema contract keyed by locator.
@@ -820,10 +829,11 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Add end-to-end query-to-replay example and troubleshooting guidance.
 
 **Exit Criteria**
-- Metadata lag/catch-up tests pass.
-- Live indexer restart/catch-up preserves monotonic watermark and idempotent indexing.
-- Query requests beyond watermark return explicit `NotIndexedYet` behavior.
-- Example demonstrates offset-first rematerialization.
+- Metadata schema contract (locator-first fields, versions, and compatibility notes) is published and checked into the repo.
+- Live indexer catch-up and restart tests pass with monotonic watermark progression and idempotent reindex behavior.
+- Queries beyond watermark return explicit `NotIndexedYet` (or equivalent) in automated tests; no silent partial success.
+- `commit.idxlog`-to-index ingestion path supports both offline and continuous modes and is covered by tests.
+- End-to-end query-to-replay example is committed, runnable, and validated in CI.
 
 ### Phase 6 - Hardening and Performance
 - Run backend parity tests (`io_uring` and fallback).
@@ -832,8 +842,12 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Finalize observability dashboard fields and admin commands.
 
 **Exit Criteria**
-- Throughput/latency targets documented with reproducible benchmark scripts.
-- No unresolved data-loss or corruption bugs.
+- Backend parity suite passes for `io_uring` and fallback backend with equivalent correctness semantics.
+- Corruption-injection tests pass with explicit corruption detection and deterministic error reporting.
+- Soak tests complete for the agreed minimum duration without data loss, corruption, unbounded memory growth, or deadlock.
+- Throughput profile benchmarks are reproducible from checked-in scripts and include environment metadata (filesystem, kernel, hardware profile).
+- Reported throughput meets documented acceptance target (including `>=80%` baseline criterion where applicable) or records a tracked exception with root cause.
+- No open Sev-1/Sev-2 recorder/replayer correctness bugs at phase exit.
 
 ### Phase 7 - CLI and Operations UX
 - Add `iox2 service log-recorder` command group on top of log-admin APIs.
@@ -842,9 +856,11 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Add end-to-end CLI tests and help text/documentation.
 
 **Exit Criteria**
-- CLI commands are idempotent and pass end-to-end tests.
-- Status output contains required operational fields.
-- CLI behavior is documented in `iceoryx2-cli` help and README updates.
+- End-to-end CLI tests pass for `start`, `stop`, `status`, `flush`, `trim`, `detach`, `attach`, and `delete-detached`.
+- Idempotency tests pass for repeated lifecycle and retention operations.
+- Machine-readable output schema is versioned, validated by tests, and stable for documented fields.
+- CLI exit codes are deterministic and mapped to documented error classes.
+- Operator documentation is updated with command semantics, examples, and failure-mode troubleshooting.
 
 ### Phase 8 - Additional Pattern Adapters
 - Implement `publish_subscribe` adapter on recorder core ingest contract.
@@ -853,9 +869,11 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Add end-to-end record/replay validation for `publish_subscribe` and `pipeline`.
 
 **Exit Criteria**
-- Pub/Sub adapter conformance tests pass.
-- Pipeline adapter conformance tests pass.
-- Cross-pattern query/readiness reporting is consistent and documented.
+- Adapter conformance suites pass for both `publish_subscribe` and `pipeline`.
+- Source-identity and metadata mapping tests prove each adapter populates canonical archive fields correctly.
+- Cross-pattern replay behavior is validated for sequence-capable and locator-only paths.
+- Query/readiness reporting is consistent across adapters and verified by automated tests.
+- Traceability matrix includes adapter-specific requirement IDs and marks them `Covered` at phase exit.
 
 ## Resolved Decisions
 - Default persistence mode is `Async`; `Sync` is opt-in for stricter durability.
