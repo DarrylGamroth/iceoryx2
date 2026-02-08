@@ -11,10 +11,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 mod common;
+mod metadata;
 mod recorder;
 mod replayer;
 mod storage;
 
 pub use common::*;
+pub use metadata::*;
 pub use recorder::ArchiveRecorderBuilder;
 pub use replayer::{ArchiveReplayer, ArchiveReplayerBuilder};
