@@ -359,6 +359,8 @@ fn log_archive_recorder_reports_effective_backend_for_preferred_selection() {
 
     let recorder = ArchiveRecorderBuilder::new(&storage_path)
         .io_uring_queue_depth(1)
+        .io_submit_batch_max(1)
+        .io_cqe_batch_max(2)
         .create()
         .unwrap();
     assert_that!(

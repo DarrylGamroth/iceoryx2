@@ -62,11 +62,26 @@ pub enum PersistenceMode {
     Sync,
 }
 
+/// Named recorder runtime profile.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RecorderProfile {
+    /// Prioritizes stronger durability defaults.
+    Durable,
+    /// General-purpose defaults.
+    Balanced,
+    /// Prioritizes ingest throughput.
+    Throughput,
+    /// Prioritizes replay/query freshness.
+    Replay,
+}
+
 /// Async write backend selection for recorder data path.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AsyncIoBackend {
     /// Prefer Linux `io_uring` and fall back to blocking file I/O when unavailable.
     IoUringPreferred,
+    /// Require Linux `io_uring`; fail recorder creation when unavailable.
+    IoUringRequired,
     /// Always use blocking file I/O.
     Blocking,
 }
@@ -210,6 +225,8 @@ pub struct ArchiveRecorderStats {
     pub preallocated_segments: u64,
     /// Number of out-of-space events observed.
     pub out_of_space_events: u64,
+    /// Number of commit-log roll operations.
+    pub metadata_log_rolls: u64,
 }
 
 impl ArchiveRecorderStats {
@@ -315,6 +332,13 @@ pub enum ArchiveRecorderError {
     },
     /// Out-of-space failure.
     OutOfSpace(PathBuf),
+    /// Metadata-log size cap would be exceeded by the next append.
+    MetadataLogCapacityExceeded {
+        /// Configured metadata-log cap.
+        max_bytes: u64,
+        /// Required bytes to proceed.
+        required_bytes: u64,
+    },
     /// Retention cap cannot be met because all eligible segments are pinned.
     RetentionBlockedByPins {
         /// Configured maximum disk bytes.
@@ -354,6 +378,8 @@ impl From<ArchiveFileHeaderError> for ArchiveRecorderError {
 /// Errors returned by archive replayer operations.
 #[derive(Debug)]
 pub enum ArchiveReplayError {
+    /// Invalid configuration value.
+    InvalidConfiguration(&'static str),
     /// `commit.idxlog` file is missing.
     MissingCommitLog(PathBuf),
     /// Required segment file is missing.
@@ -414,6 +440,7 @@ impl From<ArchiveFileHeaderError> for ArchiveReplayError {
 /// Builder for [`ArchiveRecorder`].
 #[derive(Debug, Clone)]
 pub(super) struct RecorderConfig {
+    pub(super) profile: RecorderProfile,
     pub(super) storage_path: PathBuf,
     pub(super) metadata_log_path: PathBuf,
     pub(super) segment_bytes: usize,
@@ -423,9 +450,14 @@ pub(super) struct RecorderConfig {
     pub(super) persistence_mode: PersistenceMode,
     pub(super) async_io_backend: AsyncIoBackend,
     pub(super) io_uring_queue_depth: u32,
+    pub(super) io_submit_batch_max: u32,
+    pub(super) io_cqe_batch_max: u32,
+    pub(super) io_uring_register_files: bool,
     pub(super) checksum_mode: ChecksumMode,
     pub(super) out_of_space_policy: OutOfSpacePolicy,
     pub(super) max_disk_bytes: Option<u64>,
+    pub(super) metadata_log_roll_bytes: u64,
+    pub(super) metadata_log_max_bytes: u64,
     pub(super) log_id: [u8; 16],
     pub(super) segment_generation: u32,
 }
@@ -439,6 +471,7 @@ pub(super) struct DiskRecorderState {
     pub(super) commit_log_file: File,
     pub(super) commit_log_write_offset: u64,
     pub(super) commit_log_preallocated_len: u64,
+    pub(super) commit_log_roll_index: u64,
     pub(super) active_segment: Option<ActiveSegment>,
 }
 

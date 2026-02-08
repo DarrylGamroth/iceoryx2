@@ -14,6 +14,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -23,19 +25,105 @@ use super::backend::RecorderIoBackend;
 use super::common::*;
 use super::storage::*;
 
+const DEFAULT_METADATA_LOG_ROLL_BYTES: u64 = 1024 * 1024 * 1024;
+const DEFAULT_METADATA_LOG_MAX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct ProfileDefaults {
+    segment_bytes: usize,
+    spare_preallocated_segments: usize,
+    persistence_mode: PersistenceMode,
+    async_io_backend: AsyncIoBackend,
+    io_uring_queue_depth: u32,
+    io_submit_batch_max: u32,
+    io_cqe_batch_max: u32,
+    io_uring_register_files: bool,
+    metadata_log_roll_bytes: u64,
+    metadata_log_max_bytes: u64,
+}
+
+fn profile_defaults(profile: RecorderProfile) -> ProfileDefaults {
+    match profile {
+        RecorderProfile::Durable => ProfileDefaults {
+            segment_bytes: 256 * 1024 * 1024,
+            spare_preallocated_segments: 1,
+            persistence_mode: PersistenceMode::Sync,
+            async_io_backend: AsyncIoBackend::IoUringPreferred,
+            io_uring_queue_depth: 256,
+            io_submit_batch_max: 64,
+            io_cqe_batch_max: 128,
+            io_uring_register_files: true,
+            metadata_log_roll_bytes: DEFAULT_METADATA_LOG_ROLL_BYTES,
+            metadata_log_max_bytes: DEFAULT_METADATA_LOG_MAX_BYTES,
+        },
+        RecorderProfile::Balanced => ProfileDefaults {
+            segment_bytes: 256 * 1024 * 1024,
+            spare_preallocated_segments: 1,
+            persistence_mode: PersistenceMode::Async,
+            async_io_backend: AsyncIoBackend::IoUringPreferred,
+            io_uring_queue_depth: 256,
+            io_submit_batch_max: 64,
+            io_cqe_batch_max: 128,
+            io_uring_register_files: true,
+            metadata_log_roll_bytes: DEFAULT_METADATA_LOG_ROLL_BYTES,
+            metadata_log_max_bytes: DEFAULT_METADATA_LOG_MAX_BYTES,
+        },
+        RecorderProfile::Throughput => ProfileDefaults {
+            segment_bytes: 1024 * 1024 * 1024,
+            spare_preallocated_segments: 2,
+            persistence_mode: PersistenceMode::Async,
+            async_io_backend: AsyncIoBackend::IoUringRequired,
+            io_uring_queue_depth: 1024,
+            io_submit_batch_max: 256,
+            io_cqe_batch_max: 512,
+            io_uring_register_files: true,
+            metadata_log_roll_bytes: 4 * 1024 * 1024 * 1024,
+            metadata_log_max_bytes: DEFAULT_METADATA_LOG_MAX_BYTES,
+        },
+        RecorderProfile::Replay => ProfileDefaults {
+            segment_bytes: 256 * 1024 * 1024,
+            spare_preallocated_segments: 1,
+            persistence_mode: PersistenceMode::Async,
+            async_io_backend: AsyncIoBackend::IoUringPreferred,
+            io_uring_queue_depth: 256,
+            io_submit_batch_max: 64,
+            io_cqe_batch_max: 128,
+            io_uring_register_files: true,
+            metadata_log_roll_bytes: DEFAULT_METADATA_LOG_ROLL_BYTES,
+            metadata_log_max_bytes: DEFAULT_METADATA_LOG_MAX_BYTES,
+        },
+    }
+}
+
 /// Builder for [`ArchiveRecorder`].
 pub struct ArchiveRecorderBuilder {
     storage_path: PathBuf,
     metadata_log_path: Option<PathBuf>,
+    profile: RecorderProfile,
     segment_bytes: usize,
+    segment_bytes_overridden: bool,
     segment_preallocate: bool,
     spare_preallocated_segments: usize,
+    spare_preallocated_segments_overridden: bool,
     metadata_log_preallocate_entries: usize,
     persistence_mode: PersistenceMode,
+    persistence_mode_overridden: bool,
     async_io_backend: AsyncIoBackend,
+    async_io_backend_overridden: bool,
     io_uring_queue_depth: u32,
+    io_uring_queue_depth_overridden: bool,
+    io_submit_batch_max: u32,
+    io_submit_batch_max_overridden: bool,
+    io_cqe_batch_max: u32,
+    io_cqe_batch_max_overridden: bool,
+    io_uring_register_files: bool,
+    io_uring_register_files_overridden: bool,
     checksum_mode: ChecksumMode,
     out_of_space_policy: OutOfSpacePolicy,
+    metadata_log_roll_bytes: u64,
+    metadata_log_roll_bytes_overridden: bool,
+    metadata_log_max_bytes: u64,
+    metadata_log_max_bytes_overridden: bool,
     max_disk_bytes: Option<u64>,
     log_id: [u8; 16],
     segment_generation: u32,
@@ -44,22 +132,79 @@ pub struct ArchiveRecorderBuilder {
 impl ArchiveRecorderBuilder {
     /// Creates a builder with throughput-oriented defaults.
     pub fn new(storage_path: &Path) -> Self {
+        let defaults = profile_defaults(RecorderProfile::Balanced);
         Self {
             storage_path: storage_path.to_path_buf(),
             metadata_log_path: None,
-            segment_bytes: 256 * 1024 * 1024,
+            profile: RecorderProfile::Balanced,
+            segment_bytes: defaults.segment_bytes,
+            segment_bytes_overridden: false,
             segment_preallocate: true,
-            spare_preallocated_segments: 1,
+            spare_preallocated_segments: defaults.spare_preallocated_segments,
+            spare_preallocated_segments_overridden: false,
             metadata_log_preallocate_entries: DEFAULT_METADATA_LOG_PREALLOCATE_ENTRIES,
-            persistence_mode: PersistenceMode::Async,
-            async_io_backend: AsyncIoBackend::IoUringPreferred,
-            io_uring_queue_depth: 256,
+            persistence_mode: defaults.persistence_mode,
+            persistence_mode_overridden: false,
+            async_io_backend: defaults.async_io_backend,
+            async_io_backend_overridden: false,
+            io_uring_queue_depth: defaults.io_uring_queue_depth,
+            io_uring_queue_depth_overridden: false,
+            io_submit_batch_max: defaults.io_submit_batch_max,
+            io_submit_batch_max_overridden: false,
+            io_cqe_batch_max: defaults.io_cqe_batch_max,
+            io_cqe_batch_max_overridden: false,
+            io_uring_register_files: defaults.io_uring_register_files,
+            io_uring_register_files_overridden: false,
             checksum_mode: ChecksumMode::Crc32c,
             out_of_space_policy: OutOfSpacePolicy::FailWriter,
+            metadata_log_roll_bytes: defaults.metadata_log_roll_bytes,
+            metadata_log_roll_bytes_overridden: false,
+            metadata_log_max_bytes: defaults.metadata_log_max_bytes,
+            metadata_log_max_bytes_overridden: false,
             max_disk_bytes: None,
             log_id: [0u8; 16],
             segment_generation: 0,
         }
+    }
+
+    fn apply_profile_defaults(&mut self, defaults: ProfileDefaults) {
+        if !self.segment_bytes_overridden {
+            self.segment_bytes = defaults.segment_bytes;
+        }
+        if !self.spare_preallocated_segments_overridden {
+            self.spare_preallocated_segments = defaults.spare_preallocated_segments;
+        }
+        if !self.persistence_mode_overridden {
+            self.persistence_mode = defaults.persistence_mode;
+        }
+        if !self.async_io_backend_overridden {
+            self.async_io_backend = defaults.async_io_backend;
+        }
+        if !self.io_uring_queue_depth_overridden {
+            self.io_uring_queue_depth = defaults.io_uring_queue_depth;
+        }
+        if !self.io_submit_batch_max_overridden {
+            self.io_submit_batch_max = defaults.io_submit_batch_max;
+        }
+        if !self.io_cqe_batch_max_overridden {
+            self.io_cqe_batch_max = defaults.io_cqe_batch_max;
+        }
+        if !self.io_uring_register_files_overridden {
+            self.io_uring_register_files = defaults.io_uring_register_files;
+        }
+        if !self.metadata_log_roll_bytes_overridden {
+            self.metadata_log_roll_bytes = defaults.metadata_log_roll_bytes;
+        }
+        if !self.metadata_log_max_bytes_overridden {
+            self.metadata_log_max_bytes = defaults.metadata_log_max_bytes;
+        }
+    }
+
+    /// Configures recorder runtime profile defaults.
+    pub fn profile(mut self, value: RecorderProfile) -> Self {
+        self.profile = value;
+        self.apply_profile_defaults(profile_defaults(value));
+        self
     }
 
     /// Overrides metadata-log root path.
@@ -70,6 +215,7 @@ impl ArchiveRecorderBuilder {
 
     /// Configures segment byte size.
     pub fn segment_bytes(mut self, value: usize) -> Self {
+        self.segment_bytes_overridden = true;
         self.segment_bytes = value;
         self
     }
@@ -82,6 +228,7 @@ impl ArchiveRecorderBuilder {
 
     /// Configures number of spare preallocated segments.
     pub fn spare_preallocated_segments(mut self, value: usize) -> Self {
+        self.spare_preallocated_segments_overridden = true;
         self.spare_preallocated_segments = value;
         self
     }
@@ -94,19 +241,43 @@ impl ArchiveRecorderBuilder {
 
     /// Configures durability mode.
     pub fn persistence_mode(mut self, value: PersistenceMode) -> Self {
+        self.persistence_mode_overridden = true;
         self.persistence_mode = value;
         self
     }
 
     /// Configures async data-path backend selection.
     pub fn async_io_backend(mut self, value: AsyncIoBackend) -> Self {
+        self.async_io_backend_overridden = true;
         self.async_io_backend = value;
         self
     }
 
     /// Configures `io_uring` queue depth (Linux, when `IoUringPreferred` is used).
     pub fn io_uring_queue_depth(mut self, value: u32) -> Self {
+        self.io_uring_queue_depth_overridden = true;
         self.io_uring_queue_depth = value;
+        self
+    }
+
+    /// Configures maximum io_uring submissions pushed per batch.
+    pub fn io_submit_batch_max(mut self, value: u32) -> Self {
+        self.io_submit_batch_max_overridden = true;
+        self.io_submit_batch_max = value;
+        self
+    }
+
+    /// Configures completion reaping batch upper bound.
+    pub fn io_cqe_batch_max(mut self, value: u32) -> Self {
+        self.io_cqe_batch_max_overridden = true;
+        self.io_cqe_batch_max = value;
+        self
+    }
+
+    /// Enables/disables io_uring registered-file mode.
+    pub fn io_uring_register_files(mut self, value: bool) -> Self {
+        self.io_uring_register_files_overridden = true;
+        self.io_uring_register_files = value;
         self
     }
 
@@ -119,6 +290,20 @@ impl ArchiveRecorderBuilder {
     /// Configures out-of-space policy.
     pub fn out_of_space_policy(mut self, value: OutOfSpacePolicy) -> Self {
         self.out_of_space_policy = value;
+        self
+    }
+
+    /// Configures active metadata-log roll size in bytes.
+    pub fn metadata_log_roll_bytes(mut self, value: u64) -> Self {
+        self.metadata_log_roll_bytes_overridden = true;
+        self.metadata_log_roll_bytes = value;
+        self
+    }
+
+    /// Configures global metadata-log size cap in bytes.
+    pub fn metadata_log_max_bytes(mut self, value: u64) -> Self {
+        self.metadata_log_max_bytes_overridden = true;
+        self.metadata_log_max_bytes = value;
         self
     }
 
@@ -197,8 +382,46 @@ impl ArchiveRecorderBuilder {
                 "io_uring_queue_depth must be > 0",
             ));
         }
+        if self.io_submit_batch_max == 0 {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "io_submit_batch_max must be > 0",
+            ));
+        }
+        if self.io_cqe_batch_max == 0 {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "io_cqe_batch_max must be > 0",
+            ));
+        }
+        if self.io_submit_batch_max > self.io_uring_queue_depth {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "io_submit_batch_max must be <= io_uring_queue_depth",
+            ));
+        }
+        if self.io_cqe_batch_max > self.io_uring_queue_depth.saturating_mul(2) {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "io_cqe_batch_max must be <= 2 * io_uring_queue_depth",
+            ));
+        }
+        if self.metadata_log_roll_bytes
+            < (ARCHIVE_FILE_HEADER_V1_LEN as u64 + COMMIT_ENTRY_LEN as u64)
+        {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "metadata_log_roll_bytes is too small",
+            ));
+        }
+        if self.metadata_log_max_bytes < self.metadata_log_roll_bytes {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "metadata_log_max_bytes must be >= metadata_log_roll_bytes",
+            ));
+        }
+        if self.checksum_mode == ChecksumMode::None {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "checksum_mode None is not allowed; framing checksum is mandatory",
+            ));
+        }
 
         Ok(RecorderConfig {
+            profile: self.profile,
             storage_path: self.storage_path.clone(),
             metadata_log_path: self
                 .metadata_log_path
@@ -211,9 +434,14 @@ impl ArchiveRecorderBuilder {
             persistence_mode: self.persistence_mode,
             async_io_backend: self.async_io_backend,
             io_uring_queue_depth: self.io_uring_queue_depth,
+            io_submit_batch_max: self.io_submit_batch_max,
+            io_cqe_batch_max: self.io_cqe_batch_max,
+            io_uring_register_files: self.io_uring_register_files,
             checksum_mode: self.checksum_mode,
             out_of_space_policy: self.out_of_space_policy,
             max_disk_bytes: self.max_disk_bytes,
+            metadata_log_roll_bytes: self.metadata_log_roll_bytes,
+            metadata_log_max_bytes: self.metadata_log_max_bytes,
             log_id: self.log_id,
             segment_generation: self.segment_generation,
         })
@@ -221,8 +449,14 @@ impl ArchiveRecorderBuilder {
 }
 
 fn new_volatile_recorder(config: RecorderConfig) -> ArchiveRecorder {
-    let (io_backend, effective_async_io_backend) =
-        RecorderIoBackend::create(config.async_io_backend, config.io_uring_queue_depth);
+    let (io_backend, effective_async_io_backend) = RecorderIoBackend::create(
+        config.async_io_backend,
+        config.io_uring_queue_depth,
+        config.io_submit_batch_max,
+        config.io_cqe_batch_max,
+        config.io_uring_register_files,
+    )
+    .expect("volatile recorder backend configuration must be valid");
     ArchiveRecorder {
         config,
         io_backend,
@@ -296,10 +530,16 @@ fn create_new_archive(config: RecorderConfig) -> Result<ArchiveRecorder, Archive
         &commit_log_path,
         commit_log_write_offset,
         config.metadata_log_preallocate_entries,
+        Some(config.metadata_log_roll_bytes),
     )?;
 
-    let (io_backend, effective_async_io_backend) =
-        RecorderIoBackend::create(config.async_io_backend, config.io_uring_queue_depth);
+    let (io_backend, effective_async_io_backend) = RecorderIoBackend::create(
+        config.async_io_backend,
+        config.io_uring_queue_depth,
+        config.io_submit_batch_max,
+        config.io_cqe_batch_max,
+        config.io_uring_register_files,
+    )?;
 
     let mut recorder = ArchiveRecorder {
         config,
@@ -313,6 +553,7 @@ fn create_new_archive(config: RecorderConfig) -> Result<ArchiveRecorder, Archive
             commit_log_file,
             commit_log_write_offset,
             commit_log_preallocated_len,
+            commit_log_roll_index: 1,
             active_segment: None,
         }),
         stats: ArchiveRecorderStats::default(),
@@ -326,6 +567,7 @@ fn create_new_archive(config: RecorderConfig) -> Result<ArchiveRecorder, Archive
     };
 
     recorder.open_new_active_segment(1)?;
+    recorder.enforce_metadata_log_cap()?;
     Ok(recorder)
 }
 
@@ -367,6 +609,39 @@ fn recover_existing_archive(
 
     let catalog_summaries = read_catalog_entries(&catalog_path)?;
     let data_segments = list_data_segments(&segments_path)?;
+    let commit_log_paths = list_commit_log_paths(&config.metadata_log_path).map_err(|source| {
+        ArchiveRecorderError::Io {
+            operation: "list commit idxlog files during recovery",
+            path: config.metadata_log_path.clone(),
+            source,
+        }
+    })?;
+    let mut commit_entries = Vec::new();
+    let mut commit_log_roll_index = 1u64;
+    for path in &commit_log_paths {
+        if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
+            if let Some(index) = parse_rolled_commit_log_index(name) {
+                commit_log_roll_index = commit_log_roll_index.max(index.saturating_add(1));
+            }
+        }
+        if path == &commit_log_path {
+            continue;
+        }
+        let mut rolled_entries = read_commit_entries(path).map_err(|source| match source {
+            ArchiveReplayError::Io {
+                operation,
+                path,
+                source,
+            } => ArchiveRecorderError::Io {
+                operation,
+                path,
+                source,
+            },
+            ArchiveReplayError::FileHeader(error) => ArchiveRecorderError::FileHeader(error),
+            _ => ArchiveRecorderError::RecoveryInconsistent("invalid rolled commit idxlog file"),
+        })?;
+        commit_entries.append(&mut rolled_entries);
+    }
 
     let mut commit_log_file = OpenOptions::new()
         .read(true)
@@ -379,18 +654,27 @@ fn recover_existing_archive(
         })?;
     let commit_recovery =
         recover_commit_log_entries(&mut commit_log_file, &commit_log_path, &segments_path)?;
+    commit_entries.extend(commit_recovery.entries.iter().copied());
     let commit_log_write_offset = commit_recovery.logical_end_offset;
     let commit_log_preallocated_len = preallocate_metadata_log(
         &mut commit_log_file,
         &commit_log_path,
         commit_log_write_offset,
         config.metadata_log_preallocate_entries,
+        Some(config.metadata_log_roll_bytes),
     )?;
 
     let mut index_by_sequence = BTreeMap::new();
     let mut next_commit_ordinal = 1u64;
     let mut last_sequence = None;
-    for entry in &commit_recovery.entries {
+    let mut last_commit_ordinal = 0u64;
+    for entry in &commit_entries {
+        if last_commit_ordinal != 0 && entry.commit_ordinal <= last_commit_ordinal {
+            return Err(ArchiveRecorderError::RecoveryInconsistent(
+                "commit idxlog entries are not strictly ordered by commit ordinal",
+            ));
+        }
+        last_commit_ordinal = entry.commit_ordinal;
         if index_by_sequence
             .insert(entry.sequence, entry.locator)
             .is_some()
@@ -413,7 +697,7 @@ fn recover_existing_archive(
     let (active_segment_id, active_segment_generation) = determine_active_segment_for_recovery(
         &data_segments,
         &catalog_summaries,
-        &commit_recovery.entries,
+        &commit_entries,
         config.segment_generation,
         &segments_path,
     );
@@ -423,7 +707,7 @@ fn recover_existing_archive(
     let mut active_sequence_start = None;
     let mut active_sequence_end = None;
     let mut committed_active_write_offset = ARCHIVE_FILE_HEADER_V1_LEN as u64;
-    for entry in &commit_recovery.entries {
+    for entry in &commit_entries {
         if entry.locator.segment_id == active_segment_id
             && entry.locator.segment_generation == active_segment_generation
         {
@@ -447,8 +731,13 @@ fn recover_existing_archive(
             source,
         })?;
 
-    let (io_backend, effective_async_io_backend) =
-        RecorderIoBackend::create(config.async_io_backend, config.io_uring_queue_depth);
+    let (io_backend, effective_async_io_backend) = RecorderIoBackend::create(
+        config.async_io_backend,
+        config.io_uring_queue_depth,
+        config.io_submit_batch_max,
+        config.io_cqe_batch_max,
+        config.io_uring_register_files,
+    )?;
 
     let mut recorder = ArchiveRecorder {
         config: config.clone(),
@@ -462,6 +751,7 @@ fn recover_existing_archive(
             commit_log_file,
             commit_log_write_offset,
             commit_log_preallocated_len,
+            commit_log_roll_index: 1,
             active_segment: None,
         }),
         stats: ArchiveRecorderStats::default(),
@@ -485,7 +775,7 @@ fn recover_existing_archive(
     recorder.recovery_status = ArchiveRecoveryStatus {
         recovered_existing_archive: true,
         catalog_segments_loaded: catalog_summaries.len() as u64,
-        commit_entries_loaded: commit_recovery.entries.len() as u64,
+        commit_entries_loaded: commit_entries.len() as u64,
         active_segment_id,
         active_segment_generation,
         active_segment_records: active_committed_records,
@@ -500,6 +790,7 @@ fn recover_existing_archive(
     };
 
     recorder.enforce_retention_cap()?;
+    recorder.enforce_metadata_log_cap()?;
 
     Ok(recorder)
 }
@@ -524,6 +815,11 @@ impl ArchiveRecorder {
         self.config.persistence_mode
     }
 
+    /// Returns resolved recorder profile.
+    pub fn profile(&self) -> RecorderProfile {
+        self.config.profile
+    }
+
     /// Returns configured async backend preference.
     pub fn configured_async_io_backend(&self) -> AsyncIoBackend {
         self.config.async_io_backend
@@ -537,6 +833,31 @@ impl ArchiveRecorder {
     /// Returns effective segment size in bytes.
     pub fn segment_bytes(&self) -> usize {
         self.config.segment_bytes
+    }
+
+    /// Returns configured io_uring queue depth.
+    pub fn io_uring_queue_depth(&self) -> u32 {
+        self.config.io_uring_queue_depth
+    }
+
+    /// Returns configured io_uring submission batch size.
+    pub fn io_submit_batch_max(&self) -> u32 {
+        self.config.io_submit_batch_max
+    }
+
+    /// Returns configured io_uring completion batch size.
+    pub fn io_cqe_batch_max(&self) -> u32 {
+        self.config.io_cqe_batch_max
+    }
+
+    /// Returns configured metadata-log roll threshold in bytes.
+    pub fn metadata_log_roll_bytes(&self) -> u64 {
+        self.config.metadata_log_roll_bytes
+    }
+
+    /// Returns configured metadata-log global size cap in bytes.
+    pub fn metadata_log_max_bytes(&self) -> u64 {
+        self.config.metadata_log_max_bytes
     }
 
     /// Returns configured retained-bytes cap across tiers.
@@ -789,11 +1110,7 @@ impl ArchiveRecorder {
                     active.segment_id,
                     active.segment_generation,
                 );
-                io_backend.flush(
-                    &mut active.file,
-                    &segment_path,
-                    "flush active segment",
-                )?;
+                io_backend.flush(&mut active.file, &segment_path, "flush active segment")?;
             }
 
             io_backend.flush(
@@ -801,11 +1118,7 @@ impl ArchiveRecorder {
                 &disk.commit_log_path,
                 "flush commit idxlog",
             )?;
-            io_backend.flush(
-                &mut disk.catalog_file,
-                &disk.catalog_path,
-                "flush catalog",
-            )?;
+            io_backend.flush(&mut disk.catalog_file, &disk.catalog_path, "flush catalog")?;
         }
 
         Ok(())
@@ -950,7 +1263,11 @@ impl ArchiveRecorder {
             active.records += 1;
         }
 
-        self.ensure_commit_log_capacity()?;
+        self.roll_commit_log_if_needed()?;
+        let commit_log_resized = self.ensure_commit_log_capacity()?;
+        if commit_log_resized {
+            self.enforce_metadata_log_cap()?;
+        }
         let commit_log_path = self
             .disk
             .as_ref()
@@ -1060,12 +1377,125 @@ impl ArchiveRecorder {
         })
     }
 
-    fn ensure_commit_log_capacity(&mut self) -> Result<(), ArchiveRecorderError> {
+    fn enforce_metadata_log_cap(&mut self) -> Result<(), ArchiveRecorderError> {
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(());
+        }
+
+        let commit_logs =
+            list_commit_log_paths(&self.config.metadata_log_path).map_err(|source| {
+                ArchiveRecorderError::Io {
+                    operation: "list commit idxlog files",
+                    path: self.config.metadata_log_path.clone(),
+                    source,
+                }
+            })?;
+        let mut total_bytes = 0u64;
+        for path in &commit_logs {
+            let bytes = path
+                .metadata()
+                .map_err(|source| ArchiveRecorderError::Io {
+                    operation: "read commit idxlog metadata",
+                    path: path.to_path_buf(),
+                    source,
+                })?
+                .len();
+            total_bytes = total_bytes.saturating_add(bytes);
+        }
+
+        if total_bytes > self.config.metadata_log_max_bytes {
+            self.degraded = true;
+            return Err(ArchiveRecorderError::MetadataLogCapacityExceeded {
+                max_bytes: self.config.metadata_log_max_bytes,
+                required_bytes: total_bytes,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn roll_commit_log_if_needed(&mut self) -> Result<(), ArchiveRecorderError> {
+        let should_roll = {
+            let disk = self.disk.as_ref().expect("disk recorder state must exist");
+            disk.commit_log_write_offset + COMMIT_ENTRY_LEN as u64
+                > self.config.metadata_log_roll_bytes
+        };
+        if !should_roll {
+            return Ok(());
+        }
+
+        {
+            let disk = self.disk.as_mut().expect("disk recorder state must exist");
+            self.io_backend.flush(
+                &mut disk.commit_log_file,
+                &disk.commit_log_path,
+                "flush commit idxlog before roll",
+            )?;
+            self.io_backend.sync_data(
+                &mut disk.commit_log_file,
+                &disk.commit_log_path,
+                "sync commit idxlog before roll",
+            )?;
+        }
+        self.truncate_commit_log_to_logical_size()?;
+
+        let (active_path, rolled_path, roll_index) = {
+            let disk = self.disk.as_ref().expect("disk recorder state must exist");
+            let mut path =
+                commit_log_roll_path(&self.config.metadata_log_path, disk.commit_log_roll_index);
+            let mut index = disk.commit_log_roll_index;
+            while path.exists() {
+                index = index.saturating_add(1);
+                path = commit_log_roll_path(&self.config.metadata_log_path, index);
+            }
+            (disk.commit_log_path.clone(), path, index)
+        };
+
+        fs::rename(&active_path, &rolled_path).map_err(|source| ArchiveRecorderError::Io {
+            operation: "roll commit idxlog file",
+            path: active_path.clone(),
+            source,
+        })?;
+
+        let new_active_path = self.config.metadata_log_path.join("commit.idxlog");
+        let (mut commit_log_file, commit_log_path) = create_new_file(&new_active_path)?;
+        write_archive_header(
+            &mut commit_log_file,
+            &commit_log_path,
+            ArchiveFileKind::CommitIdxLog,
+            self.config.log_id,
+            0,
+            0,
+        )?;
+        let commit_log_write_offset = ARCHIVE_FILE_HEADER_V1_LEN as u64;
+        let commit_log_preallocated_len = preallocate_metadata_log(
+            &mut commit_log_file,
+            &commit_log_path,
+            commit_log_write_offset,
+            self.config.metadata_log_preallocate_entries,
+            Some(self.config.metadata_log_roll_bytes),
+        )?;
+
+        {
+            let disk = self.disk.as_mut().expect("disk recorder state must exist");
+            disk.commit_log_file = commit_log_file;
+            disk.commit_log_path = commit_log_path;
+            disk.commit_log_write_offset = commit_log_write_offset;
+            disk.commit_log_preallocated_len = commit_log_preallocated_len;
+            disk.commit_log_roll_index = roll_index.saturating_add(1);
+        }
+        self.stats.metadata_log_rolls = self.stats.metadata_log_rolls.saturating_add(1);
+        self.refresh_backend_registered_files()?;
+        self.enforce_metadata_log_cap()?;
+        Ok(())
+    }
+
+    fn ensure_commit_log_capacity(&mut self) -> Result<bool, ArchiveRecorderError> {
         let required = {
             let disk = self.disk.as_ref().expect("disk recorder state must exist");
             let required = disk.commit_log_write_offset + COMMIT_ENTRY_LEN as u64;
             if required <= disk.commit_log_preallocated_len {
-                return Ok(());
+                return Ok(false);
             }
             required
         };
@@ -1077,6 +1507,7 @@ impl ArchiveRecorder {
                 &disk.commit_log_path,
                 required,
                 self.config.metadata_log_preallocate_entries,
+                Some(self.config.metadata_log_roll_bytes),
             )
         };
         let preallocated_len = match result {
@@ -1086,10 +1517,10 @@ impl ArchiveRecorder {
 
         let disk = self.disk.as_mut().expect("disk recorder state must exist");
         if required <= disk.commit_log_preallocated_len {
-            return Ok(());
+            return Ok(false);
         }
         disk.commit_log_preallocated_len = preallocated_len;
-        Ok(())
+        Ok(true)
     }
 
     fn truncate_commit_log_to_logical_size(&mut self) -> Result<(), ArchiveRecorderError> {
@@ -1493,23 +1924,36 @@ impl ArchiveRecorder {
                 active.segment_id,
                 active.segment_generation,
             );
-            io_backend.sync_data(
-                &mut active.file,
-                &segment_path,
-                "sync active segment",
-            )?;
+            io_backend.sync_data(&mut active.file, &segment_path, "sync active segment")?;
         }
         io_backend.sync_data(
             &mut disk.commit_log_file,
             &disk.commit_log_path,
             "sync commit idxlog",
         )?;
-        io_backend.sync_data(
-            &mut disk.catalog_file,
-            &disk.catalog_path,
-            "sync catalog",
-        )?;
+        io_backend.sync_data(&mut disk.catalog_file, &disk.catalog_path, "sync catalog")?;
 
+        Ok(())
+    }
+
+    fn refresh_backend_registered_files(&mut self) -> Result<(), ArchiveRecorderError> {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(disk) = self.disk.as_ref() else {
+                return Ok(());
+            };
+            let mut fds = Vec::with_capacity(3);
+            fds.push(disk.commit_log_file.as_raw_fd());
+            fds.push(disk.catalog_file.as_raw_fd());
+            if let Some(active) = disk.active_segment.as_ref() {
+                fds.push(active.file.as_raw_fd());
+            }
+            self.io_backend.refresh_registered_files(&fds)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.io_backend.refresh_registered_files(&[])?;
+        }
         Ok(())
     }
 
@@ -1572,6 +2016,7 @@ impl ArchiveRecorder {
             file,
         });
 
+        self.refresh_backend_registered_files()?;
         self.create_spare_preallocated_segments(segment_id + 1)?;
         Ok(())
     }
@@ -1633,11 +2078,8 @@ impl ArchiveRecorder {
                 active.segment_id,
                 active.segment_generation,
             );
-            self.io_backend.flush(
-                &mut active.file,
-                &segment_path,
-                "flush segment before seal",
-            )?;
+            self.io_backend
+                .flush(&mut active.file, &segment_path, "flush segment before seal")?;
             self.io_backend.sync_data(
                 &mut active.file,
                 &segment_path,
@@ -1681,6 +2123,7 @@ impl ArchiveRecorder {
                 &summary_bytes,
                 "write segment summary",
             )?;
+            self.io_backend.flush_pending()?;
             self.stats.metadata_bytes_written +=
                 ARCHIVE_FILE_HEADER_V1_LEN as u64 + summary_bytes.len() as u64;
 
@@ -1700,6 +2143,7 @@ impl ArchiveRecorder {
                 &summary_bytes,
                 "append catalog segment summary",
             )?;
+            self.io_backend.flush_pending()?;
             self.stats.metadata_bytes_written += summary_bytes.len() as u64;
             self.stats.rolled_segments += 1;
         }
@@ -1725,6 +2169,7 @@ mod tests {
 
     fn baseline_recorder_config() -> RecorderConfig {
         RecorderConfig {
+            profile: RecorderProfile::Balanced,
             storage_path: PathBuf::from("/tmp/unused"),
             metadata_log_path: PathBuf::from("/tmp/unused"),
             segment_bytes: 1024,
@@ -1734,9 +2179,14 @@ mod tests {
             persistence_mode: PersistenceMode::Async,
             async_io_backend: AsyncIoBackend::Blocking,
             io_uring_queue_depth: 8,
+            io_submit_batch_max: 8,
+            io_cqe_batch_max: 8,
+            io_uring_register_files: false,
             checksum_mode: ChecksumMode::Crc32c,
             out_of_space_policy: OutOfSpacePolicy::FailWriter,
             max_disk_bytes: None,
+            metadata_log_roll_bytes: 1024 * 1024,
+            metadata_log_max_bytes: 16 * 1024 * 1024,
             log_id: [0u8; 16],
             segment_generation: 0,
         }
@@ -1744,7 +2194,8 @@ mod tests {
 
     fn baseline_recorder() -> ArchiveRecorder {
         let (io_backend, effective_async_io_backend) =
-            RecorderIoBackend::create(AsyncIoBackend::Blocking, 8);
+            RecorderIoBackend::create(AsyncIoBackend::Blocking, 8, 8, 8, false)
+                .expect("blocking backend");
         ArchiveRecorder {
             config: baseline_recorder_config(),
             io_backend,

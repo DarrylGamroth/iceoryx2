@@ -49,11 +49,20 @@ pub(super) fn preallocate_metadata_log(
     commit_log_path: &Path,
     logical_end_offset: u64,
     preallocate_entries: usize,
+    max_file_len: Option<u64>,
 ) -> Result<u64, ArchiveRecorderError> {
     let preallocate_bytes = (preallocate_entries.saturating_mul(COMMIT_ENTRY_LEN)) as u64;
-    let target_len = logical_end_offset.checked_add(preallocate_bytes).ok_or(
+    let mut target_len = logical_end_offset.checked_add(preallocate_bytes).ok_or(
         ArchiveRecorderError::InvalidConfiguration("metadata-log preallocation length overflow"),
     )?;
+    if let Some(max_file_len) = max_file_len {
+        target_len = target_len.min(max_file_len);
+        if target_len < logical_end_offset {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "metadata-log preallocation target below logical end",
+            ));
+        }
+    }
     file.set_len(target_len)
         .map_err(|source| ArchiveRecorderError::Io {
             operation: "preallocate commit idxlog",
@@ -483,6 +492,40 @@ pub(super) fn scan_active_segment_tail(
 }
 
 pub(super) fn read_commit_entries(path: &Path) -> Result<Vec<CommitEntry>, ArchiveReplayError> {
+    if path.file_name().and_then(|value| value.to_str()) == Some("commit.idxlog") {
+        let metadata_root = path.parent().unwrap_or(Path::new("."));
+        let commit_logs =
+            list_commit_log_paths(metadata_root).map_err(|source| ArchiveReplayError::Io {
+                operation: "list commit idxlog files",
+                path: metadata_root.to_path_buf(),
+                source,
+            })?;
+        if commit_logs.is_empty() {
+            return Err(ArchiveReplayError::MissingCommitLog(path.to_path_buf()));
+        }
+
+        let mut entries = Vec::new();
+        let mut last_commit_ordinal = 0u64;
+        for commit_log in commit_logs {
+            let part = read_commit_entries_single(&commit_log)?;
+            for entry in part {
+                if last_commit_ordinal != 0 && entry.commit_ordinal <= last_commit_ordinal {
+                    return Err(ArchiveReplayError::InvalidCommitEntry(
+                        "commit idxlog files are not strictly ordered by commit ordinal",
+                    ));
+                }
+                last_commit_ordinal = entry.commit_ordinal;
+                entries.push(entry);
+            }
+        }
+
+        return Ok(entries);
+    }
+
+    read_commit_entries_single(path)
+}
+
+fn read_commit_entries_single(path: &Path) -> Result<Vec<CommitEntry>, ArchiveReplayError> {
     let mut file = File::open(path).map_err(|source| ArchiveReplayError::Io {
         operation: "open commit idxlog",
         path: path.to_path_buf(),
@@ -580,6 +623,44 @@ pub(super) fn read_commit_entries(path: &Path) -> Result<Vec<CommitEntry>, Archi
     }
 
     Ok(entries)
+}
+
+pub(super) fn list_commit_log_paths(metadata_root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut rolled = Vec::<(u64, PathBuf)>::new();
+    let mut active = None::<PathBuf>;
+
+    let entries = fs::read_dir(metadata_root)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if name == "commit.idxlog" {
+            active = Some(path);
+            continue;
+        }
+        if let Some(index) = parse_rolled_commit_log_index(name) {
+            rolled.push((index, path));
+        }
+    }
+
+    rolled.sort_by_key(|(index, _)| *index);
+    let mut result = rolled.into_iter().map(|(_, path)| path).collect::<Vec<_>>();
+    if let Some(active) = active {
+        result.push(active);
+    }
+
+    Ok(result)
+}
+
+pub(super) fn parse_rolled_commit_log_index(file_name: &str) -> Option<u64> {
+    let value = file_name.strip_prefix("commit-")?.strip_suffix(".idxlog")?;
+    value.parse::<u64>().ok()
+}
+
+pub(super) fn commit_log_roll_path(metadata_root: &Path, roll_index: u64) -> PathBuf {
+    metadata_root.join(format!("commit-{roll_index:020}.idxlog"))
 }
 
 pub(super) fn write_archive_header(

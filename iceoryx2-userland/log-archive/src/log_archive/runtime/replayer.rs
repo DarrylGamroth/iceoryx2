@@ -61,6 +61,12 @@ impl ArchiveReplayerBuilder {
 
     /// Opens archive replayer.
     pub fn open(self) -> Result<ArchiveReplayer, ArchiveReplayError> {
+        if !self.verify_checksums {
+            return Err(ArchiveReplayError::InvalidConfiguration(
+                "checksum verification cannot be disabled",
+            ));
+        }
+
         let metadata_root = self
             .metadata_log_path
             .clone()
