@@ -48,6 +48,31 @@ pub struct SpinLock<T> {
     value: UnsafeCell<T>,
 }
 
+#[derive(Debug)]
+struct Backoff {
+    rounds: u32,
+}
+
+impl Backoff {
+    fn new() -> Self {
+        Self { rounds: 0 }
+    }
+
+    fn snooze(&mut self) {
+        let spin_count = 1_u32 << self.rounds.min(6);
+        for _ in 0..spin_count {
+            spin_loop();
+        }
+
+        #[cfg(feature = "std")]
+        if self.rounds >= 7 {
+            std::thread::yield_now();
+        }
+
+        self.rounds = self.rounds.saturating_add(1);
+    }
+}
+
 // T must be Send as SpinLock::*_lock() can be used to send values of T to another thread
 // T don't need to be Sync as the SpinLock guarantees that only one thread at a time can access
 // T via *_lock()
@@ -74,16 +99,32 @@ impl<T> SpinLock<T> {
 
     /// Blocks until a lock on `T` is obtained. Returns a [`SpinLockGuard`] that unlocks `T` when dropped.
     pub fn blocking_lock(&self) -> SpinLockGuard<'_, T> {
-        while self.locked.swap(true, Ordering::Acquire) {
-            spin_loop();
+        let mut backoff = Backoff::new();
+
+        loop {
+            while self.locked.load(Ordering::Relaxed) {
+                backoff.snooze();
+            }
+
+            if self
+                .locked
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return SpinLockGuard { lock: self };
+            }
+
+            backoff.snooze();
         }
-        SpinLockGuard { lock: self }
     }
 
     /// Tries once to lock `T` and returns an [`Option`]. If successful, the [`Option`] contains
     /// a [`SpinLockGuard`] that unlocks `T` when dropped, otherwise it contains [`None`].
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
-        (!self.locked.swap(true, Ordering::Acquire)).then(|| SpinLockGuard { lock: self })
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+            .then(|| SpinLockGuard { lock: self })
     }
 }
 
