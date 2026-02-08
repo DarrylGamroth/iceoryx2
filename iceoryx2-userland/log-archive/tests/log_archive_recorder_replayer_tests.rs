@@ -16,8 +16,8 @@ use std::io::{Seek, SeekFrom, Write};
 
 use iceoryx2_bb_testing::assert_that;
 use iceoryx2_userland_log_archive::log_archive::{
-    ArchiveRecorderBuilder, ArchiveReplayError, ArchiveReplayerBuilder, ChecksumMode,
-    LogRecordInput, PersistenceMode, ReplayBudget, ARCHIVE_FILE_HEADER_V1_LEN,
+    ArchiveRecorderBuilder, ArchiveReplayError, ArchiveReplayerBuilder, ArchiveSegmentTier,
+    ChecksumMode, LogRecordInput, PersistenceMode, ReplayBudget, ARCHIVE_FILE_HEADER_V1_LEN,
 };
 
 #[test]
@@ -763,4 +763,189 @@ fn log_archive_volatile_mode_avoids_disk_artifacts() {
         matches!(replay_open, Err(ArchiveReplayError::MissingCommitLog(_))),
         eq true
     );
+}
+
+fn write_rolled_archive(
+    storage_path: &std::path::Path,
+    metadata_path: &std::path::Path,
+    max_disk_bytes: Option<u64>,
+    records: u64,
+) -> iceoryx2_userland_log_archive::log_archive::ArchiveRecorder {
+    let mut builder = ArchiveRecorderBuilder::new(storage_path)
+        .metadata_log_path(metadata_path)
+        .segment_bytes(256)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .persistence_mode(PersistenceMode::Async)
+        .checksum_mode(ChecksumMode::Crc32c);
+    if let Some(value) = max_disk_bytes {
+        builder = builder.max_disk_bytes(value);
+    }
+
+    let mut recorder = builder.create().unwrap();
+    for sequence in 1..=records {
+        recorder
+            .append_log_record(LogRecordInput {
+                sequence,
+                event_time_ns: sequence * 100,
+                user_header: &[0xA1, 0xB2],
+                payload: &[sequence as u8; 32],
+            })
+            .unwrap();
+    }
+    recorder.finalize().unwrap();
+    recorder
+}
+
+#[test]
+fn log_archive_retention_arbiter_is_deterministic_for_equivalent_inputs() {
+    let temp = tempfile::tempdir().unwrap();
+    let cap = 560u64;
+
+    let recorder_a = write_rolled_archive(
+        &temp.path().join("archive_a"),
+        &temp.path().join("metadata_a"),
+        Some(cap),
+        12,
+    );
+    let recorder_b = write_rolled_archive(
+        &temp.path().join("archive_b"),
+        &temp.path().join("metadata_b"),
+        Some(cap),
+        12,
+    );
+
+    let status_a = recorder_a.retention_status().unwrap();
+    let status_b = recorder_b.retention_status().unwrap();
+    assert_that!(status_a.retained_bytes_total <= cap, eq true);
+    assert_that!(status_b.retained_bytes_total <= cap, eq true);
+
+    let remaining_a: Vec<(u64, u32)> = recorder_a
+        .list_segments()
+        .unwrap()
+        .into_iter()
+        .map(|segment| (segment.segment_id, segment.segment_generation))
+        .collect();
+    let remaining_b: Vec<(u64, u32)> = recorder_b
+        .list_segments()
+        .unwrap()
+        .into_iter()
+        .map(|segment| (segment.segment_id, segment.segment_generation))
+        .collect();
+
+    assert_that!(remaining_a.is_empty(), eq false);
+    assert_that!(remaining_a, eq remaining_b);
+}
+
+#[test]
+fn log_archive_detach_attach_delete_lifecycle_is_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    let mut recorder = write_rolled_archive(&storage_path, &metadata_path, None, 6);
+    let initial_segments = recorder.list_segments().unwrap();
+    assert_that!(initial_segments.is_empty(), eq false);
+
+    let detached_once = recorder.detach_before_sequence(u64::MAX).unwrap();
+    let detached_twice = recorder.detach_before_sequence(u64::MAX).unwrap();
+    assert_that!(detached_once, eq initial_segments.len() as u64);
+    assert_that!(detached_twice, eq 0);
+
+    let status_detached = recorder.retention_status().unwrap();
+    assert_that!(status_detached.segments_hot_attached, eq 0);
+    assert_that!(
+        status_detached.segments_cold_detached,
+        eq initial_segments.len()
+    );
+
+    let attached_once = recorder.attach_all_detached().unwrap();
+    let attached_twice = recorder.attach_all_detached().unwrap();
+    assert_that!(attached_once, eq initial_segments.len() as u64);
+    assert_that!(attached_twice, eq 0);
+
+    let _ = recorder.detach_before_sequence(u64::MAX).unwrap();
+    let deleted_once = recorder.delete_detached_before_sequence(u64::MAX).unwrap();
+    let deleted_twice = recorder.delete_detached_before_sequence(u64::MAX).unwrap();
+    assert_that!(deleted_once, eq initial_segments.len() as u64);
+    assert_that!(deleted_twice, eq 0);
+
+    let status_deleted = recorder.retention_status().unwrap();
+    assert_that!(status_deleted.segments_hot_attached, eq 0);
+    assert_that!(status_deleted.segments_cold_detached, eq 0);
+    assert_that!(status_deleted.retained_bytes_total, eq 0);
+}
+
+#[test]
+fn log_archive_trim_respects_replay_snapshot_pins() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    let mut recorder = write_rolled_archive(&storage_path, &metadata_path, None, 5);
+    let replayer = ArchiveReplayerBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .open()
+        .unwrap();
+    let snapshot = replayer.begin_snapshot().unwrap();
+
+    let pinned_before_trim = recorder
+        .list_segments()
+        .unwrap()
+        .iter()
+        .all(|segment| segment.pinned);
+    assert_that!(pinned_before_trim, eq true);
+
+    let trimmed_with_pin = recorder.trim_before_sequence(u64::MAX).unwrap();
+    assert_that!(trimmed_with_pin, eq 0);
+    assert_that!(recorder.list_segments().unwrap().is_empty(), eq false);
+
+    replayer.release_snapshot(snapshot).unwrap();
+    let trimmed_after_release = recorder.trim_before_sequence(u64::MAX).unwrap();
+    assert_that!(trimmed_after_release > 0, eq true);
+    assert_that!(recorder.list_segments().unwrap().is_empty(), eq true);
+}
+
+#[test]
+fn log_archive_replayer_returns_none_for_trimmed_sequences() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    let mut recorder = write_rolled_archive(&storage_path, &metadata_path, None, 4);
+    let trimmed = recorder.trim_before_sequence(u64::MAX).unwrap();
+    assert_that!(trimmed > 0, eq true);
+
+    let replayer = ArchiveReplayerBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .open()
+        .unwrap();
+    let replayed = replayer.read_at_sequence(1).unwrap();
+    assert_that!(replayed.is_none(), eq true);
+}
+
+#[test]
+fn log_archive_capacity_enforcement_holds_under_sustained_ingest() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+    let cap = 700u64;
+
+    let recorder = write_rolled_archive(&storage_path, &metadata_path, Some(cap), 100);
+    let status = recorder.retention_status().unwrap();
+    assert_that!(status.retained_bytes_total <= cap, eq true);
+    assert_that!(status.retained_bytes_hot_attached + status.retained_bytes_cold_detached, eq status.retained_bytes_total);
+
+    let remaining = recorder.list_segments().unwrap();
+    assert_that!(remaining.is_empty(), eq false);
+    let oldest_retained = remaining
+        .iter()
+        .map(|segment| segment.sequence_start)
+        .min()
+        .unwrap();
+    assert_that!(oldest_retained > 1, eq true);
+    let all_hot = remaining
+        .iter()
+        .all(|segment| segment.tier == ArchiveSegmentTier::HotAttached);
+    assert_that!(all_hot, eq true);
 }

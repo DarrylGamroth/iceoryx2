@@ -77,6 +77,66 @@ pub enum OutOfSpacePolicy {
     FailWriter,
 }
 
+/// Tier location of a sealed archive segment.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ArchiveSegmentTier {
+    /// Segment is available in the hot replay/query path.
+    HotAttached,
+    /// Segment is detached and requires attach before default replay/query.
+    ColdDetached,
+}
+
+/// Snapshot/pin handle used to protect replay windows from trim/detach.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ReplayPin {
+    /// Unique pin identifier.
+    pub pin_id: u64,
+    /// Inclusive start sequence protected by this pin.
+    pub sequence_start: u64,
+    /// Inclusive end sequence protected by this pin.
+    pub sequence_end: u64,
+}
+
+/// Observable state of one sealed segment for admin/introspection.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct ArchiveSegmentState {
+    /// Segment id.
+    pub segment_id: u64,
+    /// Segment generation.
+    pub segment_generation: u32,
+    /// Inclusive first sequence in this segment.
+    pub sequence_start: u64,
+    /// Inclusive last sequence in this segment.
+    pub sequence_end: u64,
+    /// Number of records in this segment.
+    pub records: u64,
+    /// Used bytes in the segment file.
+    pub data_bytes_used: u64,
+    /// Current tier.
+    pub tier: ArchiveSegmentTier,
+    /// True when this segment overlaps at least one active replay pin.
+    pub pinned: bool,
+}
+
+/// Retention/tier counters for admin status fields.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct ArchiveRetentionStatus {
+    /// Configured global disk cap (`None` means unlimited).
+    pub max_disk_bytes: Option<u64>,
+    /// Total retained bytes across tiers.
+    pub retained_bytes_total: u64,
+    /// Retained bytes in hot-attached tier.
+    pub retained_bytes_hot_attached: u64,
+    /// Retained bytes in cold-detached tier.
+    pub retained_bytes_cold_detached: u64,
+    /// Number of sealed segments in hot-attached tier.
+    pub segments_hot_attached: usize,
+    /// Number of sealed segments in cold-detached tier.
+    pub segments_cold_detached: usize,
+    /// Number of pinned sealed segments.
+    pub pinned_segments: usize,
+}
+
 /// Physical frame locator in archive storage.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ArchiveLocator {
@@ -236,6 +296,13 @@ pub enum ArchiveRecorderError {
     },
     /// Out-of-space failure.
     OutOfSpace(PathBuf),
+    /// Retention cap cannot be met because all eligible segments are pinned.
+    RetentionBlockedByPins {
+        /// Configured maximum disk bytes.
+        max_disk_bytes: u64,
+        /// Current retained bytes.
+        retained_bytes: u64,
+    },
     /// Recovery validation failed due to inconsistent persisted state.
     RecoveryInconsistent(&'static str),
     /// File header encoding/validation failure.
@@ -278,6 +345,8 @@ pub enum ArchiveReplayError {
     InvalidCommitEntry(&'static str),
     /// Duplicate sequence in commit-log.
     DuplicateSequence(u64),
+    /// Creating/releasing replay pins failed due to malformed pin state.
+    InvalidPinState(&'static str),
     /// Corrupted frame header magic.
     InvalidFrameMagic([u8; 4]),
     /// Corrupted frame header length.
@@ -335,6 +404,7 @@ pub(super) struct RecorderConfig {
     pub(super) persistence_mode: PersistenceMode,
     pub(super) checksum_mode: ChecksumMode,
     pub(super) out_of_space_policy: OutOfSpacePolicy,
+    pub(super) max_disk_bytes: Option<u64>,
     pub(super) log_id: [u8; 16],
     pub(super) segment_generation: u32,
 }
@@ -530,6 +600,36 @@ pub(super) fn segment_data_path(base: &Path, segment_id: u64, generation: u32) -
 
 pub(super) fn segment_meta_path(base: &Path, segment_id: u64, generation: u32) -> PathBuf {
     base.join(format!("segment-{segment_id}-g{generation}.meta"))
+}
+
+pub(super) fn detached_segments_path(storage_root: &Path) -> PathBuf {
+    storage_root.join("detached")
+}
+
+pub(super) fn pin_directory(metadata_root: &Path) -> PathBuf {
+    metadata_root.join("pins")
+}
+
+pub(super) fn pin_file_name(pin: ReplayPin) -> String {
+    format!(
+        "pin-{}-s{}-e{}.pin",
+        pin.pin_id, pin.sequence_start, pin.sequence_end
+    )
+}
+
+pub(super) fn pin_file_path(metadata_root: &Path, pin: ReplayPin) -> PathBuf {
+    pin_directory(metadata_root).join(pin_file_name(pin))
+}
+
+pub(super) fn parse_pin_file_name(name: &str) -> Option<ReplayPin> {
+    let value = name.strip_prefix("pin-")?.strip_suffix(".pin")?;
+    let (id, rest) = value.split_once("-s")?;
+    let (start, end) = rest.split_once("-e")?;
+    Some(ReplayPin {
+        pin_id: id.parse().ok()?,
+        sequence_start: start.parse().ok()?,
+        sequence_end: end.parse().ok()?,
+    })
 }
 
 pub(super) fn align_up(value: usize, alignment: usize) -> usize {

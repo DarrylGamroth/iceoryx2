@@ -13,7 +13,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use std::fs::{self, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -33,6 +33,7 @@ pub struct ArchiveRecorderBuilder {
     persistence_mode: PersistenceMode,
     checksum_mode: ChecksumMode,
     out_of_space_policy: OutOfSpacePolicy,
+    max_disk_bytes: Option<u64>,
     log_id: [u8; 16],
     segment_generation: u32,
 }
@@ -50,6 +51,7 @@ impl ArchiveRecorderBuilder {
             persistence_mode: PersistenceMode::Async,
             checksum_mode: ChecksumMode::Crc32c,
             out_of_space_policy: OutOfSpacePolicy::FailWriter,
+            max_disk_bytes: None,
             log_id: [0u8; 16],
             segment_generation: 0,
         }
@@ -100,6 +102,12 @@ impl ArchiveRecorderBuilder {
     /// Configures out-of-space policy.
     pub fn out_of_space_policy(mut self, value: OutOfSpacePolicy) -> Self {
         self.out_of_space_policy = value;
+        self
+    }
+
+    /// Configures global retained-bytes cap across hot and detached tiers.
+    pub fn max_disk_bytes(mut self, value: u64) -> Self {
+        self.max_disk_bytes = Some(value);
         self
     }
 
@@ -160,6 +168,13 @@ impl ArchiveRecorderBuilder {
                 "metadata_log_preallocate_entries must be > 0",
             ));
         }
+        if let Some(max_disk_bytes) = self.max_disk_bytes {
+            if max_disk_bytes == 0 {
+                return Err(ArchiveRecorderError::InvalidConfiguration(
+                    "max_disk_bytes must be > 0 when configured",
+                ));
+            }
+        }
 
         Ok(RecorderConfig {
             storage_path: self.storage_path.clone(),
@@ -174,6 +189,7 @@ impl ArchiveRecorderBuilder {
             persistence_mode: self.persistence_mode,
             checksum_mode: self.checksum_mode,
             out_of_space_policy: self.out_of_space_policy,
+            max_disk_bytes: self.max_disk_bytes,
             log_id: self.log_id,
             segment_generation: self.segment_generation,
         })
@@ -207,9 +223,21 @@ fn create_new_archive(config: RecorderConfig) -> Result<ArchiveRecorder, Archive
         path: segments_path.clone(),
         source,
     })?;
+    let detached_path = detached_segments_path(&config.storage_path);
+    fs::create_dir_all(&detached_path).map_err(|source| ArchiveRecorderError::Io {
+        operation: "create detached segments directory",
+        path: detached_path.clone(),
+        source,
+    })?;
     fs::create_dir_all(&config.metadata_log_path).map_err(|source| ArchiveRecorderError::Io {
         operation: "create metadata directory",
         path: config.metadata_log_path.clone(),
+        source,
+    })?;
+    let pins_path = pin_directory(&config.metadata_log_path);
+    fs::create_dir_all(&pins_path).map_err(|source| ArchiveRecorderError::Io {
+        operation: "create replay pin directory",
+        path: pins_path.clone(),
         source,
     })?;
 
@@ -273,6 +301,7 @@ fn recover_existing_archive(
 ) -> Result<ArchiveRecorder, ArchiveRecorderError> {
     let recovery_start = Instant::now();
     let segments_path = config.storage_path.join("segments");
+    let detached_path = detached_segments_path(&config.storage_path);
     let catalog_path = config.storage_path.join("catalog.bin");
     let commit_log_path = config.metadata_log_path.join("commit.idxlog");
 
@@ -282,10 +311,25 @@ fn recover_existing_archive(
     if !segments_path.exists() {
         return Err(ArchiveRecorderError::MissingArchiveComponent(segments_path));
     }
+    if !detached_path.exists() {
+        fs::create_dir_all(&detached_path).map_err(|source| ArchiveRecorderError::Io {
+            operation: "create detached segments directory during recovery",
+            path: detached_path.clone(),
+            source,
+        })?;
+    }
     if !commit_log_path.exists() {
         return Err(ArchiveRecorderError::MissingArchiveComponent(
             commit_log_path,
         ));
+    }
+    let pins_path = pin_directory(&config.metadata_log_path);
+    if !pins_path.exists() {
+        fs::create_dir_all(&pins_path).map_err(|source| ArchiveRecorderError::Io {
+            operation: "create replay pin directory during recovery",
+            path: pins_path.clone(),
+            source,
+        })?;
     }
 
     let catalog_summaries = read_catalog_entries(&catalog_path)?;
@@ -417,6 +461,8 @@ fn recover_existing_archive(
         recovery_duration_ns: recovery_start.elapsed().as_nanos() as u64,
     };
 
+    recorder.enforce_retention_cap()?;
+
     Ok(recorder)
 }
 impl ArchiveRecorder {
@@ -443,6 +489,213 @@ impl ArchiveRecorder {
     /// Returns effective segment size in bytes.
     pub fn segment_bytes(&self) -> usize {
         self.config.segment_bytes
+    }
+
+    /// Returns configured retained-bytes cap across tiers.
+    pub fn max_disk_bytes(&self) -> Option<u64> {
+        self.config.max_disk_bytes
+    }
+
+    /// Returns retention/tier status for admin surfaces.
+    pub fn retention_status(&self) -> Result<ArchiveRetentionStatus, ArchiveRecorderError> {
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(ArchiveRetentionStatus {
+                max_disk_bytes: self.config.max_disk_bytes,
+                ..ArchiveRetentionStatus::default()
+            });
+        }
+
+        let segments = self.collect_segment_states()?;
+        let mut status = ArchiveRetentionStatus {
+            max_disk_bytes: self.config.max_disk_bytes,
+            ..ArchiveRetentionStatus::default()
+        };
+
+        for segment in segments {
+            status.retained_bytes_total += segment.data_bytes_used;
+            if segment.pinned {
+                status.pinned_segments += 1;
+            }
+            match segment.tier {
+                ArchiveSegmentTier::HotAttached => {
+                    status.segments_hot_attached += 1;
+                    status.retained_bytes_hot_attached += segment.data_bytes_used;
+                }
+                ArchiveSegmentTier::ColdDetached => {
+                    status.segments_cold_detached += 1;
+                    status.retained_bytes_cold_detached += segment.data_bytes_used;
+                }
+            }
+        }
+
+        Ok(status)
+    }
+
+    /// Lists sealed segment tier state and pin overlap.
+    pub fn list_segments(&self) -> Result<Vec<ArchiveSegmentState>, ArchiveRecorderError> {
+        self.collect_segment_states()
+    }
+
+    /// Creates an explicit replay pin for `[sequence_start, sequence_end]`.
+    pub fn begin_replay_pin(
+        &self,
+        sequence_start: u64,
+        sequence_end: u64,
+    ) -> Result<ReplayPin, ArchiveRecorderError> {
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "replay pins require persisted archive mode",
+            ));
+        }
+        if sequence_start > sequence_end {
+            return Err(ArchiveRecorderError::InvalidConfiguration(
+                "replay pin requires sequence_start <= sequence_end",
+            ));
+        }
+
+        let metadata_root = &self.config.metadata_log_path;
+        let pin_dir = pin_directory(metadata_root);
+        fs::create_dir_all(&pin_dir).map_err(|source| ArchiveRecorderError::Io {
+            operation: "create replay pin directory",
+            path: pin_dir.clone(),
+            source,
+        })?;
+
+        for attempt in 0..1024u64 {
+            let pin = ReplayPin {
+                pin_id: now_ns().wrapping_add(attempt),
+                sequence_start,
+                sequence_end,
+            };
+            let path = pin_file_path(metadata_root, pin);
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    file.flush().map_err(|source| ArchiveRecorderError::Io {
+                        operation: "flush replay pin file",
+                        path: path.clone(),
+                        source,
+                    })?;
+                    return Ok(pin);
+                }
+                Err(source) if source.kind() == ErrorKind::AlreadyExists => continue,
+                Err(source) => {
+                    return Err(ArchiveRecorderError::Io {
+                        operation: "create replay pin file",
+                        path,
+                        source,
+                    })
+                }
+            }
+        }
+
+        Err(ArchiveRecorderError::InvalidConfiguration(
+            "unable to allocate unique replay pin id",
+        ))
+    }
+
+    /// Releases a previously created replay pin. Idempotent.
+    pub fn release_replay_pin(&self, pin: ReplayPin) -> Result<(), ArchiveRecorderError> {
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(());
+        }
+        let path = pin_file_path(&self.config.metadata_log_path, pin);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(ArchiveRecorderError::Io {
+                operation: "remove replay pin file",
+                path,
+                source,
+            }),
+        }
+    }
+
+    /// Detaches all sealed hot-attached segments with `sequence_end < before_sequence`.
+    pub fn detach_before_sequence(
+        &mut self,
+        before_sequence: u64,
+    ) -> Result<u64, ArchiveRecorderError> {
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(0);
+        }
+
+        let summaries = self.sealed_segment_summaries()?;
+        let pins = self.active_replay_pins()?;
+        let mut detached = 0u64;
+        for summary in summaries {
+            if summary.sequence_end >= before_sequence {
+                continue;
+            }
+            if overlaps_any_pin(summary.sequence_start, summary.sequence_end, &pins) {
+                continue;
+            }
+            if self.detach_segment(summary.segment_id, summary.segment_generation)? {
+                detached += 1;
+            }
+        }
+
+        Ok(detached)
+    }
+
+    /// Attaches all detached sealed segments. Idempotent.
+    pub fn attach_all_detached(&mut self) -> Result<u64, ArchiveRecorderError> {
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(0);
+        }
+
+        let summaries = self.sealed_segment_summaries()?;
+        let mut attached = 0u64;
+        for summary in summaries {
+            if self.attach_segment(summary.segment_id, summary.segment_generation)? {
+                attached += 1;
+            }
+        }
+        Ok(attached)
+    }
+
+    /// Deletes detached sealed segments with `sequence_end < before_sequence`.
+    ///
+    /// Segments overlapping active replay pins are skipped.
+    pub fn delete_detached_before_sequence(
+        &mut self,
+        before_sequence: u64,
+    ) -> Result<u64, ArchiveRecorderError> {
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(0);
+        }
+
+        let summaries = self.sealed_segment_summaries()?;
+        let pins = self.active_replay_pins()?;
+        let mut deleted = 0u64;
+        for summary in summaries {
+            if summary.sequence_end >= before_sequence {
+                continue;
+            }
+            if overlaps_any_pin(summary.sequence_start, summary.sequence_end, &pins) {
+                continue;
+            }
+            if self.delete_detached_segment(summary.segment_id, summary.segment_generation)? {
+                self.remove_sequence_index_for_segment(&summary);
+                deleted += 1;
+            }
+        }
+
+        Ok(deleted)
+    }
+
+    /// Trims by sequence boundary with deterministic oldest-first policy.
+    ///
+    /// This operation first detaches matching hot segments, then deletes detached segments.
+    pub fn trim_before_sequence(
+        &mut self,
+        before_sequence: u64,
+    ) -> Result<u64, ArchiveRecorderError> {
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(0);
+        }
+
+        let _ = self.detach_before_sequence(before_sequence)?;
+        self.delete_detached_before_sequence(before_sequence)
     }
 
     /// Appends one log record.
@@ -792,6 +1045,319 @@ impl ArchiveRecorder {
         Ok(())
     }
 
+    fn collect_segment_states(&self) -> Result<Vec<ArchiveSegmentState>, ArchiveRecorderError> {
+        let summaries = self.sealed_segment_summaries()?;
+        let pins = self.active_replay_pins()?;
+        let segments_path = match self.disk.as_ref() {
+            Some(disk) => disk.segments_path.clone(),
+            None => self.config.storage_path.join("segments"),
+        };
+        let detached_path = detached_segments_path(&self.config.storage_path);
+
+        let mut states = Vec::new();
+        for summary in summaries {
+            let hot_data = segment_data_path(
+                &segments_path,
+                summary.segment_id,
+                summary.segment_generation,
+            );
+            let hot_meta = segment_meta_path(
+                &segments_path,
+                summary.segment_id,
+                summary.segment_generation,
+            );
+            let detached_data = segment_data_path(
+                &detached_path,
+                summary.segment_id,
+                summary.segment_generation,
+            );
+            let detached_meta = segment_meta_path(
+                &detached_path,
+                summary.segment_id,
+                summary.segment_generation,
+            );
+
+            let tier = if hot_data.exists() || hot_meta.exists() {
+                Some(ArchiveSegmentTier::HotAttached)
+            } else if detached_data.exists() || detached_meta.exists() {
+                Some(ArchiveSegmentTier::ColdDetached)
+            } else {
+                None
+            };
+
+            let Some(tier) = tier else {
+                continue;
+            };
+
+            states.push(ArchiveSegmentState {
+                segment_id: summary.segment_id,
+                segment_generation: summary.segment_generation,
+                sequence_start: summary.sequence_start,
+                sequence_end: summary.sequence_end,
+                records: summary.records,
+                data_bytes_used: summary.data_bytes_used,
+                tier,
+                pinned: overlaps_any_pin(summary.sequence_start, summary.sequence_end, &pins),
+            });
+        }
+
+        states.sort_by_key(|state| {
+            (
+                state.sequence_start,
+                state.segment_id,
+                state.segment_generation,
+            )
+        });
+        Ok(states)
+    }
+
+    fn sealed_segment_summaries(&self) -> Result<Vec<SegmentSummary>, ArchiveRecorderError> {
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(Vec::new());
+        }
+
+        let catalog_path = match self.disk.as_ref() {
+            Some(disk) => disk.catalog_path.clone(),
+            None => self.config.storage_path.join("catalog.bin"),
+        };
+        if !catalog_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        read_catalog_entries(&catalog_path)
+    }
+
+    fn active_replay_pins(&self) -> Result<Vec<ReplayPin>, ArchiveRecorderError> {
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(Vec::new());
+        }
+
+        let pin_dir = pin_directory(&self.config.metadata_log_path);
+        if !pin_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let entries = fs::read_dir(&pin_dir).map_err(|source| ArchiveRecorderError::Io {
+            operation: "read replay pin directory",
+            path: pin_dir.clone(),
+            source,
+        })?;
+        let mut pins = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| ArchiveRecorderError::Io {
+                operation: "read replay pin entry",
+                path: pin_dir.clone(),
+                source,
+            })?;
+            let Some(name) = entry.file_name().to_str().map(|value| value.to_owned()) else {
+                continue;
+            };
+            if let Some(pin) = parse_pin_file_name(&name) {
+                pins.push(pin);
+            }
+        }
+
+        Ok(pins)
+    }
+
+    fn detach_segment(
+        &mut self,
+        segment_id: u64,
+        segment_generation: u32,
+    ) -> Result<bool, ArchiveRecorderError> {
+        let Some(disk) = self.disk.as_ref() else {
+            return Ok(false);
+        };
+        if let Some(active) = disk.active_segment.as_ref() {
+            if active.segment_id == segment_id && active.segment_generation == segment_generation {
+                return Ok(false);
+            }
+        }
+
+        let segments_path = disk.segments_path.clone();
+        let detached_path = detached_segments_path(&self.config.storage_path);
+        fs::create_dir_all(&detached_path).map_err(|source| ArchiveRecorderError::Io {
+            operation: "create detached segments directory",
+            path: detached_path.clone(),
+            source,
+        })?;
+
+        let mut changed = false;
+        changed |= self.move_segment_file(
+            &segment_data_path(&segments_path, segment_id, segment_generation),
+            &segment_data_path(&detached_path, segment_id, segment_generation),
+        )?;
+        changed |= self.move_segment_file(
+            &segment_meta_path(&segments_path, segment_id, segment_generation),
+            &segment_meta_path(&detached_path, segment_id, segment_generation),
+        )?;
+
+        Ok(changed)
+    }
+
+    fn attach_segment(
+        &mut self,
+        segment_id: u64,
+        segment_generation: u32,
+    ) -> Result<bool, ArchiveRecorderError> {
+        let Some(disk) = self.disk.as_ref() else {
+            return Ok(false);
+        };
+        let segments_path = disk.segments_path.clone();
+        let detached_path = detached_segments_path(&self.config.storage_path);
+
+        let mut changed = false;
+        changed |= self.move_segment_file(
+            &segment_data_path(&detached_path, segment_id, segment_generation),
+            &segment_data_path(&segments_path, segment_id, segment_generation),
+        )?;
+        changed |= self.move_segment_file(
+            &segment_meta_path(&detached_path, segment_id, segment_generation),
+            &segment_meta_path(&segments_path, segment_id, segment_generation),
+        )?;
+
+        Ok(changed)
+    }
+
+    fn delete_detached_segment(
+        &mut self,
+        segment_id: u64,
+        segment_generation: u32,
+    ) -> Result<bool, ArchiveRecorderError> {
+        let Some(disk) = self.disk.as_ref() else {
+            return Ok(false);
+        };
+        let segments_path = disk.segments_path.clone();
+        let detached_path = detached_segments_path(&self.config.storage_path);
+
+        let hot_data = segment_data_path(&segments_path, segment_id, segment_generation);
+        let hot_meta = segment_meta_path(&segments_path, segment_id, segment_generation);
+        if hot_data.exists() || hot_meta.exists() {
+            return Ok(false);
+        }
+
+        let mut deleted = false;
+        deleted |= self.remove_file_if_exists(&segment_data_path(
+            &detached_path,
+            segment_id,
+            segment_generation,
+        ))?;
+        deleted |= self.remove_file_if_exists(&segment_meta_path(
+            &detached_path,
+            segment_id,
+            segment_generation,
+        ))?;
+
+        Ok(deleted)
+    }
+
+    fn move_segment_file(
+        &self,
+        source: &Path,
+        target: &Path,
+    ) -> Result<bool, ArchiveRecorderError> {
+        if !source.exists() {
+            return Ok(false);
+        }
+
+        if target.exists() {
+            fs::remove_file(source).map_err(|source_error| ArchiveRecorderError::Io {
+                operation: "remove duplicate segment file during tier move",
+                path: source.to_path_buf(),
+                source: source_error,
+            })?;
+            return Ok(true);
+        }
+
+        fs::rename(source, target).map_err(|source_error| ArchiveRecorderError::Io {
+            operation: "move segment file between tiers",
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+        Ok(true)
+    }
+
+    fn remove_file_if_exists(&self, path: &Path) -> Result<bool, ArchiveRecorderError> {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(source) if source.kind() == ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(ArchiveRecorderError::Io {
+                operation: "remove segment file",
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
+    fn remove_sequence_index_for_segment(&mut self, summary: &SegmentSummary) {
+        let keys: Vec<u64> = self
+            .index_by_sequence
+            .range(summary.sequence_start..=summary.sequence_end)
+            .map(|(sequence, _)| *sequence)
+            .collect();
+        for key in keys {
+            self.index_by_sequence.remove(&key);
+        }
+    }
+
+    fn enforce_retention_cap(&mut self) -> Result<(), ArchiveRecorderError> {
+        let Some(max_disk_bytes) = self.config.max_disk_bytes else {
+            return Ok(());
+        };
+        if self.config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(());
+        }
+
+        let mut retained = self.retention_status()?.retained_bytes_total;
+        if retained <= max_disk_bytes {
+            return Ok(());
+        }
+
+        let mut states = self.collect_segment_states()?;
+        states.sort_by_key(|state| {
+            (
+                state.sequence_start,
+                state.segment_id,
+                state.segment_generation,
+            )
+        });
+        for state in states {
+            if retained <= max_disk_bytes {
+                return Ok(());
+            }
+            if state.pinned {
+                continue;
+            }
+            if state.tier == ArchiveSegmentTier::HotAttached {
+                let _ = self.detach_segment(state.segment_id, state.segment_generation)?;
+            }
+            if self.delete_detached_segment(state.segment_id, state.segment_generation)? {
+                let summary = SegmentSummary {
+                    segment_id: state.segment_id,
+                    segment_generation: state.segment_generation,
+                    sequence_start: state.sequence_start,
+                    sequence_end: state.sequence_end,
+                    records: state.records,
+                    created_at_ns: 0,
+                    sealed_at_ns: 0,
+                    data_bytes_used: state.data_bytes_used,
+                    segment_checksum: 0,
+                };
+                self.remove_sequence_index_for_segment(&summary);
+                retained = retained.saturating_sub(state.data_bytes_used);
+            }
+        }
+
+        if retained > max_disk_bytes {
+            return Err(ArchiveRecorderError::RetentionBlockedByPins {
+                max_disk_bytes,
+                retained_bytes: retained,
+            });
+        }
+
+        Ok(())
+    }
+
     fn recover_active_segment_tail(
         &mut self,
         committed_write_offset: u64,
@@ -1095,8 +1661,15 @@ impl ArchiveRecorder {
             self.open_new_active_segment(active.segment_id + 1)?;
         }
 
+        self.enforce_retention_cap()?;
+
         Ok(())
     }
+}
+
+fn overlaps_any_pin(sequence_start: u64, sequence_end: u64, pins: &[ReplayPin]) -> bool {
+    pins.iter()
+        .any(|pin| pin.sequence_start <= sequence_end && sequence_start <= pin.sequence_end)
 }
 
 #[cfg(test)]
@@ -1114,6 +1687,7 @@ mod tests {
             persistence_mode: PersistenceMode::Async,
             checksum_mode: ChecksumMode::Crc32c,
             out_of_space_policy: OutOfSpacePolicy::FailWriter,
+            max_disk_bytes: None,
             log_id: [0u8; 16],
             segment_generation: 0,
         }

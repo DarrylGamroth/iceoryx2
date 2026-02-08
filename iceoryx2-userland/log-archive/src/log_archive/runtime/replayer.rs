@@ -15,8 +15,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::min;
 use core::num::NonZeroUsize;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::common::*;
@@ -70,9 +70,18 @@ impl ArchiveReplayerBuilder {
             return Err(ArchiveReplayError::MissingCommitLog(commit_log_path));
         }
 
+        let segments_path = self.storage_path.join("segments");
         let entries = read_commit_entries(&commit_log_path)?;
         let mut index_by_sequence = BTreeMap::new();
         for entry in entries {
+            let hot_segment_path = segment_data_path(
+                &segments_path,
+                entry.locator.segment_id,
+                entry.locator.segment_generation,
+            );
+            if !hot_segment_path.exists() {
+                continue;
+            }
             if index_by_sequence.insert(entry.sequence, entry).is_some() {
                 return Err(ArchiveReplayError::DuplicateSequence(entry.sequence));
             }
@@ -80,7 +89,8 @@ impl ArchiveReplayerBuilder {
         let ordered_sequences: Vec<u64> = index_by_sequence.keys().copied().collect();
 
         Ok(ArchiveReplayer {
-            segments_path: self.storage_path.join("segments"),
+            segments_path,
+            metadata_log_path: metadata_root,
             index_by_sequence,
             ordered_sequences,
             cursor: 0,
@@ -94,6 +104,7 @@ impl ArchiveReplayerBuilder {
 #[derive(Debug)]
 pub struct ArchiveReplayer {
     segments_path: PathBuf,
+    metadata_log_path: PathBuf,
     index_by_sequence: BTreeMap<u64, CommitEntry>,
     ordered_sequences: Vec<u64>,
     cursor: usize,
@@ -110,6 +121,89 @@ impl ArchiveReplayer {
     /// Sets replay budget.
     pub fn set_replay_budget(&mut self, value: ReplayBudget) {
         self.replay_budget = value;
+    }
+
+    /// Begins a snapshot pin that protects the current replay window from retention trim.
+    pub fn begin_snapshot(&self) -> Result<ReplayPin, ArchiveReplayError> {
+        let Some(sequence_start) = self.ordered_sequences.first().copied() else {
+            return Err(ArchiveReplayError::InvalidPinState(
+                "cannot create snapshot pin for empty archive",
+            ));
+        };
+        let sequence_end =
+            self.ordered_sequences
+                .last()
+                .copied()
+                .ok_or(ArchiveReplayError::InvalidPinState(
+                    "cannot resolve snapshot end sequence",
+                ))?;
+
+        self.begin_pin(sequence_start, sequence_end)
+    }
+
+    /// Begins a replay pin for the provided inclusive sequence range.
+    pub fn begin_pin(
+        &self,
+        sequence_start: u64,
+        sequence_end: u64,
+    ) -> Result<ReplayPin, ArchiveReplayError> {
+        if sequence_start > sequence_end {
+            return Err(ArchiveReplayError::InvalidPinState(
+                "replay pin requires sequence_start <= sequence_end",
+            ));
+        }
+
+        let pin_dir = pin_directory(&self.metadata_log_path);
+        fs::create_dir_all(&pin_dir).map_err(|source| ArchiveReplayError::Io {
+            operation: "create replay pin directory",
+            path: pin_dir.clone(),
+            source,
+        })?;
+
+        for attempt in 0..1024u64 {
+            let pin = ReplayPin {
+                pin_id: now_ns().wrapping_add(attempt),
+                sequence_start,
+                sequence_end,
+            };
+            let path = pin_file_path(&self.metadata_log_path, pin);
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    file.flush().map_err(|source| ArchiveReplayError::Io {
+                        operation: "flush replay pin file",
+                        path: path.clone(),
+                        source,
+                    })?;
+                    return Ok(pin);
+                }
+                Err(source) if source.kind() == ErrorKind::AlreadyExists => continue,
+                Err(source) => {
+                    return Err(ArchiveReplayError::Io {
+                        operation: "create replay pin file",
+                        path,
+                        source,
+                    })
+                }
+            }
+        }
+
+        Err(ArchiveReplayError::InvalidPinState(
+            "unable to allocate unique replay pin id",
+        ))
+    }
+
+    /// Releases a previously created snapshot/replay pin. Idempotent.
+    pub fn release_snapshot(&self, pin: ReplayPin) -> Result<(), ArchiveReplayError> {
+        let path = pin_file_path(&self.metadata_log_path, pin);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(ArchiveReplayError::Io {
+                operation: "remove replay pin file",
+                path,
+                source,
+            }),
+        }
     }
 
     /// Reads a record by source sequence.
