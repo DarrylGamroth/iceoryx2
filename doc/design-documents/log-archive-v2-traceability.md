@@ -4,7 +4,7 @@
 - Draft
 - Last updated: 2026-02-08
 - Source specification: `doc/design-documents/log-archive-v2.md`
-- Scope of this matrix: Phase 0, Phase 1, Phase 2, Phase 3, and Phase 4 implemented requirements and planned Phase 7 CLI-introspection requirements.
+- Scope of this matrix: Phase 0, Phase 1, Phase 2, Phase 3, Phase 4, and Phase 5 implemented requirements and planned Phase 7 CLI-introspection requirements.
 
 ## Legend
 - `Covered`: requirement is implemented and has automated verification evidence.
@@ -42,6 +42,12 @@
 | `LA2-P4-003` | Replay pin/snapshot constraints `MUST` prevent detach/delete actions that violate replay safety. | Phase 4 retention and tier arbitration | `iceoryx2-userland/log-archive/src/log_archive/runtime/recorder.rs`, `iceoryx2-userland/log-archive/src/log_archive/runtime/replayer.rs` (`begin_snapshot`, pin overlap checks) | `log_archive_trim_respects_replay_snapshot_pins` | Covered | Pin lifecycle is explicit and idempotent. |
 | `LA2-P4-004` | Tier-state and retention outcomes `MUST` be observable through admin status fields. | Phase 4 exit criteria | `iceoryx2-userland/log-archive/src/log_archive/runtime/common.rs`, `iceoryx2-userland/log-archive/src/log_archive/runtime/recorder.rs` (`ArchiveRetentionStatus`, `ArchiveSegmentState`, `retention_status`, `list_segments`) | `log_archive_detach_attach_delete_lifecycle_is_idempotent`, `log_archive_capacity_enforcement_holds_under_sustained_ingest` | Covered | Exposes retained bytes by tier and segment counts. |
 | `LA2-P4-005` | Default sequence replay scope `MUST` reflect hot-attached retained data after trim/detach. | Tiered storage replay/query behavior | `iceoryx2-userland/log-archive/src/log_archive/runtime/replayer.rs` (`ArchiveReplayerBuilder::open` hot-segment filtering) | `log_archive_replayer_returns_none_for_trimmed_sequences` | Covered | Trimmed/detached sequences resolve to not-available (`None`) in default mode. |
+| `LA2-P5-001` | Metadata schema contract `MUST` be published with stable locator-first fields and versioning. | Phase 5 metadata integration | `iceoryx2-userland/log-archive/src/log_archive/runtime/metadata.rs` (`MetadataCommitRecord`, schema version constants) | `log_archive_metadata_indexer_tests` (`metadata_indexer_query_to_replay_path_is_end_to_end_functional`) | Covered | Schema is DB-agnostic in core; DB adapters are external. |
+| `LA2-P5-002` | Continuous `commit.idxlog` indexing `MUST` support durable watermark tracking and restart catch-up. | Phase 5 metadata integration | `iceoryx2-userland/log-archive/src/log_archive/runtime/metadata.rs` (`ArchiveMetadataIndexer`, watermark persistence) | `metadata_indexer_catch_up_restart_and_reindex_are_monotonic_and_idempotent`, `metadata_indexer_supports_offline_and_continuous_commitlog_ingestion` | Covered | Watermark file is persisted as `indexer.watermark`. |
+| `LA2-P5-003` | Query surfaces `MUST` report watermark and return explicit `NotIndexedYet` beyond indexed boundary. | Metadata WAL and query-readiness contract | `iceoryx2-userland/log-archive/src/log_archive/runtime/metadata.rs` (`MetadataQueryError::NotIndexedYet`) | `metadata_indexer_queries_beyond_watermark_return_not_indexed_yet` | Covered | No silent partial success path. |
+| `LA2-P5-004` | Optional built-in `core-locator.idx` path `MUST` support immediate locator queries without external DB dependency. | Phase 5 metadata integration | `iceoryx2-userland/log-archive/src/log_archive/runtime/metadata.rs` (`enable_core_locator_index`, core index load/append) | `metadata_indexer_catch_up_restart_and_reindex_are_monotonic_and_idempotent` | Covered | Index is deterministic and reindexable. |
+| `LA2-P5-005` | SQLite reference sink `MUST` be provided as userland adapter tooling, decoupled from core runtime. | Phase 5 metadata integration + userland scope decision | `iceoryx2-userland/log-archive-sqlite/src/lib.rs` (`SqliteMetadataSink`) | `sqlite_sink_tests` (`sqlite_metadata_sink_materializes_commitlog_records`) | Covered | Core crate remains DB-agnostic. |
+| `LA2-P5-006` | End-to-end query-to-replay example and troubleshooting guidance `MUST` be committed. | Phase 5 exit criteria | `iceoryx2-userland/log-archive/examples/query_to_replay.rs`, `doc/design-documents/log-archive-v2.md` (Phase 5 troubleshooting section) | `cargo test -p iceoryx2-userland-log-archive --examples` | Covered | Example demonstrates indexer query + replayer rematerialization. |
 | `LA2-P7-001` | CLI `MUST` provide archive-introspection commands (`list-segments`, `inspect-commit-log`, `inspect-record` by sequence/locator). | CLI Control Surface (Planned), Phase 7 | `N/A (planned)` | `N/A (planned)` | Gap | Required for parity with record-and-replay style operational introspection. |
 | `LA2-P7-002` | CLI introspection `MUST` return deterministic not-available errors for out-of-retention sequence/locator queries. | CLI Control Surface (Planned), Phase 7 | `N/A (planned)` | `N/A (planned)` | Gap | Error class and exit-code mapping must be stable. |
 | `LA2-P7-003` | CLI introspection `MUST` support machine-readable output parity (`RON`, `JSON`) with stable field names. | CLI Control Surface (Planned), Phase 7 | `N/A (planned)` | `N/A (planned)` | Gap | Applies to segment listings, commit-log inspection, and record inspection output. |
@@ -64,8 +70,12 @@
 ## Verification Evidence
 - Command: `cargo test -p iceoryx2-userland-log-archive --tests -- --nocapture`
 - Command: `cargo test -p iceoryx2-userland-log-archive --lib -- --nocapture`
+- Command: `cargo test -p iceoryx2-userland-log-archive --examples`
+- Command: `cargo test -p iceoryx2-userland-log-archive-sqlite --tests -- --nocapture`
 - Last successful run: 2026-02-08
 - Relevant test files:
 - `iceoryx2-userland/log-archive/tests/log_archive_file_header_tests.rs`
+- `iceoryx2-userland/log-archive/tests/log_archive_metadata_indexer_tests.rs`
 - `iceoryx2-userland/log-archive/tests/log_archive_recorder_replayer_tests.rs`
 - `iceoryx2-userland/log-archive/src/log_archive/runtime/recorder.rs` (unit tests)
+- `iceoryx2-userland/log-archive-sqlite/tests/sqlite_sink_tests.rs`

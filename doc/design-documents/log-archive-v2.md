@@ -828,12 +828,12 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Tier-state and retention outcomes are observable via admin status fields and verified by automated tests.
 - Capacity enforcement is verified under sustained ingest with deterministic policy behavior at/over watermarks.
 
-### Phase 5 - Metadata Integration and Tooling
+### Phase 5 - Metadata Integration and Tooling (Completed 2026-02-08)
 - Publish metadata schema contract keyed by locator.
 - Implement continuous `commit.idxlog` live-indexer mode with durable watermark tracking.
 - Implement query watermark reporting (`last_commit_ordinal`, `last_indexed_commit_ordinal`).
 - Implement optional `core-locator.idx` path for immediate locator queries without external DB dependency.
-- Provide SQLite reference sink for `commit.idxlog` or async sink path.
+- Provide SQLite reference sink as an external userland adapter crate for `commit.idxlog` ingestion.
 - Add end-to-end query-to-replay example and troubleshooting guidance.
 
 **Exit Criteria**
@@ -842,6 +842,17 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Queries beyond watermark return explicit `NotIndexedYet` (or equivalent) in automated tests; no silent partial success.
 - `commit.idxlog`-to-index ingestion path supports both offline and continuous modes and is covered by tests.
 - End-to-end query-to-replay example is committed, runnable, and validated in CI.
+
+**Troubleshooting Guidance (Phase 5)**
+- `NotIndexedYet` query result:
+- verify `last_commit_ordinal` and `last_indexed_commit_ordinal` from indexer/admin status.
+- run indexer catch-up until `query_watermark` reaches requested sequence/locator boundary.
+- Sequence is below watermark but still unavailable:
+- treat as out-of-retention (`NotAvailable`) and validate retained segment tier state.
+- confirm detached/trimmed lifecycle actions for the target sequence/locator.
+- Restart/catch-up drift:
+- ensure `indexer.watermark` is writable and persisted on each successful catch-up cycle.
+- run idempotent `reindex` when watermark or index files are suspected stale/corrupted.
 
 ### Phase 6 - Hardening and Performance
 - Run backend parity tests (`io_uring` and fallback).
