@@ -10,8 +10,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use iceoryx2_userland_log_archive::log_archive::*;
 use iceoryx2_bb_testing::assert_that;
+use iceoryx2_userland_log_archive::log_archive::*;
 
 const GOLDEN_CATALOG_HEADER_V1: [u8; ARCHIVE_FILE_HEADER_V1_LEN] = [
     73, 79, 88, 50, 1, 0, 1, 0, 0, 0, 76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

@@ -14,11 +14,11 @@ use core::num::NonZeroUsize;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
+use iceoryx2_bb_testing::assert_that;
 use iceoryx2_userland_log_archive::log_archive::{
     ArchiveRecorderBuilder, ArchiveReplayError, ArchiveReplayerBuilder, ChecksumMode,
     LogRecordInput, PersistenceMode, ReplayBudget, ARCHIVE_FILE_HEADER_V1_LEN,
 };
-use iceoryx2_bb_testing::assert_that;
 
 #[test]
 fn log_archive_recorder_and_replayer_support_sequence_and_locator_reads() {
