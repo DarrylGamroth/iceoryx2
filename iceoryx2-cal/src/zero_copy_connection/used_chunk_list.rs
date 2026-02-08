@@ -12,8 +12,8 @@
 
 use core::alloc::Layout;
 
-use iceoryx2_bb_concurrency::atomic::AtomicBool;
 use iceoryx2_bb_concurrency::atomic::Ordering;
+use iceoryx2_bb_concurrency::atomic::{AtomicBool, AtomicU64};
 use iceoryx2_bb_elementary::{
     bump_allocator::BumpAllocator,
     relocatable_ptr::{PointerTrait, RelocatablePointer},
@@ -23,8 +23,8 @@ use iceoryx2_bb_elementary_traits::{
 };
 use iceoryx2_log::{fail, fatal_panic};
 
-pub type UsedChunkList = details::UsedChunkList<OwningPointer<AtomicBool>>;
-pub type RelocatableUsedChunkList = details::UsedChunkList<RelocatablePointer<AtomicBool>>;
+pub type UsedChunkList = details::UsedChunkList<OwningPointer<AtomicU64>>;
+pub type RelocatableUsedChunkList = details::UsedChunkList<RelocatablePointer<AtomicU64>>;
 
 pub mod details {
     use core::fmt::Debug;
@@ -36,21 +36,21 @@ pub mod details {
 
     #[derive(Debug)]
     #[repr(C)]
-    pub struct UsedChunkList<PointerType: PointerTrait<AtomicBool>> {
+    pub struct UsedChunkList<PointerType: PointerTrait<AtomicU64>> {
         data_ptr: PointerType,
         capacity: usize,
         is_memory_initialized: AtomicBool,
     }
 
-    unsafe impl<PointerType: PointerTrait<AtomicBool>> Send for UsedChunkList<PointerType> {}
-    unsafe impl<PointerType: PointerTrait<AtomicBool>> Sync for UsedChunkList<PointerType> {}
+    unsafe impl<PointerType: PointerTrait<AtomicU64>> Send for UsedChunkList<PointerType> {}
+    unsafe impl<PointerType: PointerTrait<AtomicU64>> Sync for UsedChunkList<PointerType> {}
 
-    impl UsedChunkList<OwningPointer<AtomicBool>> {
+    impl UsedChunkList<OwningPointer<AtomicU64>> {
         pub fn new(capacity: usize) -> Self {
-            let mut data_ptr = OwningPointer::<AtomicBool>::new_with_alloc(capacity);
+            let mut data_ptr = OwningPointer::<AtomicU64>::new_with_alloc(capacity);
 
             for i in 0..capacity {
-                unsafe { data_ptr.as_mut_ptr().add(i).write(AtomicBool::new(false)) };
+                unsafe { data_ptr.as_mut_ptr().add(i).write(AtomicU64::new(0)) };
             }
 
             Self {
@@ -61,7 +61,7 @@ pub mod details {
         }
     }
 
-    impl RelocatableContainer for UsedChunkList<RelocatablePointer<AtomicBool>> {
+    impl RelocatableContainer for UsedChunkList<RelocatablePointer<AtomicU64>> {
         unsafe fn new_uninit(capacity: usize) -> Self {
             Self {
                 data_ptr: RelocatablePointer::new_uninit(),
@@ -81,17 +81,17 @@ pub mod details {
 
             let memory = fail!(from self, when allocator
             .allocate(Layout::from_size_align_unchecked(
-                    core::mem::size_of::<AtomicBool>() * self.capacity,
-                    core::mem::align_of::<AtomicBool>())),
+                    core::mem::size_of::<AtomicU64>() * self.capacity,
+                    core::mem::align_of::<AtomicU64>())),
             "Failed to initialize since the allocation of the data memory failed.");
 
             self.data_ptr.init(memory);
 
             for i in 0..self.capacity {
                 unsafe {
-                    (self.data_ptr.as_ptr() as *mut AtomicBool)
+                    (self.data_ptr.as_ptr() as *mut AtomicU64)
                         .add(i)
-                        .write(AtomicBool::new(false))
+                        .write(AtomicU64::new(0))
                 };
             }
 
@@ -108,9 +108,9 @@ pub mod details {
         }
     }
 
-    impl<PointerType: PointerTrait<AtomicBool> + Debug> UsedChunkList<PointerType> {
+    impl<PointerType: PointerTrait<AtomicU64> + Debug> UsedChunkList<PointerType> {
         pub const fn const_memory_size(capacity: usize) -> usize {
-            unaligned_mem_size::<AtomicBool>(capacity)
+            unaligned_mem_size::<AtomicU64>(capacity)
         }
 
         pub fn capacity(&self) -> usize {
@@ -132,7 +132,8 @@ pub mod details {
                 "This should never happen. Out of bounds access with index {idx}."
             );
 
-            unsafe { (*self.data_ptr.as_ptr().add(idx)).swap(value, Ordering::Relaxed) }
+            let new_value = u64::from(value);
+            unsafe { (*self.data_ptr.as_ptr().add(idx)).swap(new_value, Ordering::Relaxed) != 0 }
         }
 
         pub fn insert(&self, value: usize) -> bool {
@@ -147,7 +148,7 @@ pub mod details {
             self.verify_init("pop");
 
             for i in 0..self.capacity {
-                if unsafe { (*self.data_ptr.as_ptr().add(i)).swap(false, Ordering::Relaxed) } {
+                if unsafe { (*self.data_ptr.as_ptr().add(i)).swap(0, Ordering::Relaxed) != 0 } {
                     callback(i);
                 }
             }
@@ -159,14 +160,14 @@ pub mod details {
 #[repr(C)]
 pub struct FixedSizeUsedChunkList<const CAPACITY: usize> {
     list: RelocatableUsedChunkList,
-    data: [AtomicBool; CAPACITY],
+    data: [AtomicU64; CAPACITY],
 }
 
 impl<const CAPACITY: usize> Default for FixedSizeUsedChunkList<CAPACITY> {
     fn default() -> Self {
         let mut new_self = Self {
             list: unsafe { RelocatableUsedChunkList::new_uninit(CAPACITY) },
-            data: [const { AtomicBool::new(false) }; CAPACITY],
+            data: [const { AtomicU64::new(0) }; CAPACITY],
         };
 
         let allocator = BumpAllocator::new(new_self.data.as_mut_ptr().cast());

@@ -17,8 +17,18 @@ use alloc::vec::Vec;
 use iceoryx2_bb_concurrency::atomic::{AtomicU64, AtomicUsize};
 
 #[derive(Debug)]
+#[repr(align(64))]
+struct SampleReferenceCounter(AtomicU64);
+
+impl SampleReferenceCounter {
+    const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct SegmentState {
-    sample_reference_counter: Vec<AtomicU64>,
+    sample_reference_counter: Vec<SampleReferenceCounter>,
     payload_size: AtomicUsize,
 }
 
@@ -26,7 +36,7 @@ impl SegmentState {
     pub(crate) fn new(number_of_samples: usize) -> Self {
         let mut sample_reference_counter = Vec::with_capacity(number_of_samples);
         for _ in 0..number_of_samples {
-            sample_reference_counter.push(AtomicU64::new(0));
+            sample_reference_counter.push(SampleReferenceCounter::new());
         }
 
         Self {
@@ -50,11 +60,23 @@ impl SegmentState {
 
     pub(crate) fn borrow_sample(&self, distance_to_chunk: usize) -> u64 {
         self.sample_reference_counter[self.sample_index(distance_to_chunk)]
+            .0
             .fetch_add(1, Ordering::Relaxed)
     }
 
     pub(crate) fn release_sample(&self, distance_to_chunk: usize) -> u64 {
         self.sample_reference_counter[self.sample_index(distance_to_chunk)]
+            .0
             .fetch_sub(1, Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn sample_reference_counter_is_cache_line_aligned() {
+        assert_eq!(core::mem::align_of::<SampleReferenceCounter>(), 64);
     }
 }
