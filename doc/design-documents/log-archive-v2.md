@@ -1,0 +1,888 @@
+# Log Archive and Replay Extension (V2)
+
+## Status
+- Draft
+- Target branch: `design/log-archive-userland`
+- Last updated: 2026-02-08
+- Implementation progress: Phase 0 complete, Phase 1 complete, Phase 2 complete
+- Depends on: `doc/design-documents/log-messaging-pattern.md`
+- Metadata integration note: `doc/design-documents/log-archive-userland-metadata.md`
+- Canonical plan/tracking document for archive implementation phases.
+
+## Scope
+Define the v2 archive core and replay contracts, with first implementation targeting the `log` messaging pattern adapter. This is not a separate messaging pattern.
+
+## Normative Language
+The key words `MUST`, `MUST NOT`, `REQUIRED`, `SHALL`, `SHALL NOT`, `SHOULD`,
+`SHOULD NOT`, `RECOMMENDED`, `MAY`, and `OPTIONAL` in this document are to be
+interpreted as described in RFC 2119 and RFC 8174 when, and only when, they
+appear in all capitals.
+
+## Terminology
+- **Recorder**: Optional extension that persists committed pattern entries into segment files.
+- **Replayer**: Optional extension that reads persisted entries, including random access by locator and, when available, source sequence.
+- **Sequence**: Source ordering id when provided by a pattern adapter (`log` required; others optional).
+- **Locator**: Physical storage identity: `segment_id`, `segment_generation`, `file_offset`, `frame_len`.
+- **Snapshot token**: Read-consistency handle used to keep query-to-replay behavior deterministic.
+- **Metadata service**: Application-owned index service (for example SQLite).
+- **Pattern adapter**: Pattern-specific ingest binding that maps service samples (`log`, `publish_subscribe`, `pipeline`) into canonical archive records.
+
+### Canonical Field Names
+- Canonical locator fields are `segment_id`, `segment_generation`, `file_offset`, `frame_len`.
+- `generation`, `offset`, and `length` are shorthand aliases used only in prose.
+- `commit.idxlog` is a logical stream and may be stored as rolled files `commit-<roll_id>.idxlog`.
+
+## Goals
+- Add durable storage options while preserving v1 semantics for each supported pattern adapter.
+- Support one shared archive/recorder core across `log`, `publish_subscribe`, and `pipeline` via pattern adapters.
+- Add random access replay APIs keyed by sequence.
+- Add direct replay APIs keyed by physical locator for metadata-driven rematerialization.
+- Support query-driven replay workflows with application-owned metadata.
+- Support bounded retention under global capacity and optional tiered storage.
+- Detect and report data corruption during recovery and replay.
+- Make `Async` mode efficient on Linux systems with `io_uring`.
+
+## Non-Goals
+- Introducing a new top-level messaging pattern.
+- Embedding SQLite or any metadata query engine in iceoryx2 core.
+- Requiring sequence->offset translation in metadata-driven replay paths.
+- Requiring all pattern adapters to ship in the same milestone as the `log` adapter.
+
+## Architecture
+### Extension Components
+- **Recorder core**: persists canonical archive records, rolls segments, manages durability and retention metadata.
+- **Pattern adapters**: bind core recorder ingest to messaging-pattern semantics (`log`, `publish_subscribe`, `pipeline`).
+- **Replayer**: serves replay from persisted segments (`read_at`, `read_range`, `seek`, `read_at_locator`).
+- **Admin surface**: controls recorder/replayer lifecycle and retention operations.
+
+### Pattern Adapter Model
+- Recorder core `MUST` define a pattern-neutral ingest contract that accepts canonical archive frames plus source metadata.
+- Pattern adapters `MUST` provide source identity fields (`source_pattern`, service identity, optional source sequence, timestamps).
+- Log adapter `MUST` provide monotonic source sequence.
+- Pub/Sub adapter `MAY` provide source sequence if available; when unavailable it `MUST` set source-sequence-present flag to false.
+- Pipeline adapter `MUST` preserve stage/service identity and `MAY` provide stage-local sequence when available.
+- Replay/rematerialization contracts remain locator-first and pattern-neutral; pattern-specific replay helpers `MAY` be layered above core APIs.
+
+### Durability Modes
+- `Volatile`: v1 behavior, no disk persistence.
+- `Async`: in-memory commit first, durability lag allowed.
+- `Sync`: `send()` returns only after durable write acknowledgment.
+- Default persistence mode is `Async` for throughput-oriented baseline behavior.
+
+### Async Write Engine (io_uring-First)
+- Recorder async path is designed around a dedicated I/O worker that owns the submission/completion rings.
+- Preferred backend on capable Linux systems is `io_uring`; non-`io_uring` fallback backend is required for portability.
+- Segment files are treated as fixed targets for batched append operations.
+- Async write pipeline batches records and submits grouped writes with completion-driven durable-position advancement.
+- Durability fences in `Sync` mode are expressed as explicit flush barriers in the same backend abstraction.
+- Backpressure is driven by bounded in-flight operations and bounded staging memory.
+- Completion processing updates recorder metrics and surfaces deterministic write/flush failure states.
+
+### Storage Model
+- Segment-file storage with immutable sealed segments plus one active writable segment.
+- Segment metadata includes sequence range, timestamps, checksum, payload schema id.
+- Recovery uses checkpoint plus tail scan/truncation for partial writes.
+
+### Foundational Throughput Contracts (Architecture-Critical)
+- The following constraints are architectural and `MUST` be implemented as part of core recorder/replayer design, not deferred to optional hardening.
+
+- Ack and commit semantics:
+- Recorder API `MUST` expose explicit acknowledgment levels:
+- `Accepted` (accepted by recorder, not yet durable),
+- `DurableData` (segment durability reached),
+- `DurableDataAndCommitLog` (segment + `commit.idxlog` durability reached when commit-log mode is active).
+- Default `send()` behavior `MUST` be unambiguous by persistence mode (`Async` returns `Accepted`, `Sync` returns `DurableData`).
+- APIs waiting for stronger acks `MUST` have explicit timeout/error behavior.
+- Ack timeout defaults:
+- `wait_durable_data_timeout = 1s`
+- `wait_durable_data_and_commitlog_timeout = 2s`
+- `ack_poll_interval = 1ms`
+- `flush_cli_timeout = 30s`
+- Timeout `MUST` return explicit `AckTimeout` with last known durable positions.
+
+- Crash/power-loss contract:
+- Process-crash and power-loss behavior `MUST` be explicitly specified per persistence mode and ack level.
+- Recovery `MUST` guarantee prefix safety for durable boundaries (no committed hole before reported durable position).
+- Recorder/admin status `MUST` surface last durable data sequence and last durable commit-log ordinal separately.
+
+- Out-of-space and preallocation behavior:
+- Segment and metadata-log preallocation failures `MUST` transition recorder to explicit degraded/error state.
+- Recorder `MUST NOT` silently drop payload data on archive write failure.
+- Failure policy (`FailWriter`, `Backpressure`, or equivalent) `MUST` be explicit and operator-configurable.
+- Default out-of-space failure policy is `FailWriter`.
+- Near-capacity watermarks `SHOULD` be exposed for early operator action before hard out-of-space.
+
+- Replay isolation from ingest:
+- Replay I/O and ingest I/O `MUST` be isolated by scheduler/queueing so replay cannot starve recorder durable progress.
+- Implementations `SHOULD` enforce configurable replay I/O budget or concurrency caps.
+- Recorder throughput metrics `MUST` remain available per recorder/service with replay load present.
+
+- Write amplification and accounting:
+- Implementation `MUST` expose bytes-written accounting for segment data, segment metadata, and commit-log streams.
+- Operational status `MUST` expose amplification ratio (`total_bytes_written / payload_bytes_committed`).
+- Profile guidance `MUST` include expected amplification for `CommitLogOnly` vs `Hybrid`.
+- Concrete numeric amplification budgets are intentionally deferred until post-implementation benchmarking on target profiles.
+
+- Recovery-time envelope:
+- Startup/recovery complexity `MUST` be bounded by catalog + active-tail validation, not full rescan of every retained payload byte.
+- Recovery-time SLO defaults:
+- `target_recovery_time <= 5s + 0.5ms * sealed_segment_count`
+- soft operational cap `= 60s`
+- degraded threshold `= 2x target_recovery_time`
+- Recovery-time SLOs `MUST` be validated as retained-bytes and segment-count scale.
+
+### On-Disk Archive Layout (Proposed)
+- Data archive root:
+- `<data_storage_path>/<service_id>/<log_id>/catalog.bin`
+- `<data_storage_path>/<service_id>/<log_id>/segments/segment-<segment_id>-g<generation>.data`
+- `<data_storage_path>/<service_id>/<log_id>/segments/segment-<segment_id>-g<generation>.meta`
+- `<data_storage_path>/<service_id>/<log_id>/segments/segment-<segment_id>-g<generation>.idx` (optional accelerator)
+- `<data_storage_path>/<service_id>/<log_id>/core-locator.idx` (optional built-in query accelerator)
+- Metadata log root:
+- `<metadata_log_path>/<service_id>/<log_id>/commit-<roll_id>.idxlog`
+- `<metadata_log_path>/<service_id>/<log_id>/indexer.watermark` (optional persisted indexer progress marker)
+- `catalog.bin` contains fixed-width segment descriptors for fast startup and range lookup.
+- `commit.idxlog` is a logical append-only stream (one or more rolled files) used for metadata catch-up and crash recovery handoff.
+- `.data` holds serialized frame records.
+- `.idx` optionally accelerates sequence-based replay; locator-based replay does not require it.
+- `.meta` holds immutable segment summary plus final checksum and seal marker.
+- `core-locator.idx` optionally accelerates built-in sequence/time-range queries without external DB dependency.
+- `metadata_log_path` `MAY` be a different volume from `data_storage_path`.
+
+### Format Choice (Binary vs TOML)
+- Canonical archive files are binary:
+- `catalog.bin`
+- `commit-*.idxlog`
+- `segment-*.data`
+- `segment-*.meta`
+- Optional binary accelerator file:
+- `segment-*.idx`
+- Rationale:
+- zero-copy friendly parsing
+- fixed-width decode for hot paths
+- compact size and lower write amplification
+- deterministic recovery scans
+- Optional human-readable files are allowed for operators only:
+- `archive-manifest.toml` for static configuration and diagnostics
+- debug snapshots generated by tools
+- Runtime correctness `MUST NOT` depend on TOML sidecars.
+
+### Binary Header and Versioning Contract (V1)
+- Every canonical binary file starts with the same fixed header.
+
+```rust
+#[repr(C)]
+pub struct ArchiveFileHeaderV1 {
+    pub magic: [u8; 4],          // b"IOX2"
+    pub file_kind: u16,          // see FileKind values below
+    pub major: u16,              // incompatible changes
+    pub minor: u16,              // additive compatible changes
+    pub header_len: u16,         // bytes including extension area
+    pub flags: u32,              // low 24 bits optional, high 8 bits must-understand
+    pub created_at_ns: u64,
+    pub log_id: [u8; 16],
+    pub segment_id: u64,         // 0 for non-segment files
+    pub segment_generation: u32, // 0 for non-segment files
+    pub reserved: [u8; 20],      // future expansion
+    pub header_crc32c: u32,      // crc over header except this field
+}
+```
+
+`file_kind` constants:
+- `1` = `Catalog`
+- `2` = `CommitIdxLog`
+- `3` = `SegmentData`
+- `4` = `SegmentIndex`
+- `5` = `SegmentMeta`
+
+`flags` layout:
+- optional bits (`0x00FF_FFFF`) `MAY` be ignored when unknown
+- must-understand bits (`0xFF00_0000`) `MUST` be rejected when unknown
+- v1 defines all must-understand bits as reserved (`0`)
+
+Defined optional bits (v1):
+- `0x0000_0001` = `HAS_PADDING_RECORDS`
+- `0x0000_0002` = `HAS_SEGMENT_CHECKSUM`
+
+Defined must-understand bits (v1):
+- none; all values in `0xFF00_0000` are reserved and require reject if non-zero
+
+Initial format versions:
+- `catalog.bin`: `major=1, minor=0`
+- `commit.idxlog`: `major=1, minor=0`
+- `segment.data`: `major=1, minor=0`
+- `segment.meta`: `major=1, minor=0`
+- `segment.idx`: `major=1, minor=0` (only when accelerator enabled)
+
+Compatibility rules:
+- Endianness `MUST` be little-endian.
+- Reader `MUST` accept only `major == supported_major`.
+- Reader `MUST` accept `minor <= supported_minor`.
+- Reader `MUST` reject `minor > supported_minor` with `UnsupportedFormatMinor`.
+- Reader `MUST` reject unknown must-understand flag bits.
+- `major` increments `MUST` require migration tooling; implementations `MUST NOT` perform implicit in-place rewrite.
+- `minor` increments `MAY` append fields after `header_len` or add optional record fields.
+
+Conformance checks (mandatory):
+1. Reader `MUST` validate `magic == b"IOX2"`.
+2. Reader `MUST` validate `file_kind` is one of `{1,2,3,4,5}`.
+3. Reader `MUST` validate `header_len >= size_of::<ArchiveFileHeaderV1>()`.
+4. Reader `MUST` validate `major == 1` for v1 files.
+5. Reader `MUST` validate `minor <= supported_minor_for(file_kind)`.
+6. Reader `MUST` validate `(flags & 0xFF00_0000) == 0` for v1 readers.
+7. Reader `MUST` validate `header_crc32c`.
+8. Reader `MUST` validate `segment_id == 0 && segment_generation == 0` for `Catalog` and `CommitIdxLog`.
+9. Reader `MUST` validate `segment_id > 0` for `SegmentData` and `SegmentMeta`.
+10. Reader `MUST` validate that if `file_kind == SegmentIndex`, `segment_id > 0`.
+
+### Segment Data Record Format (Proposed)
+- `SegmentHeader` (fixed-size):
+- magic/version
+- `segment_id`, `generation`
+- `created_at_ns`
+- checksum policy
+- `payload_schema_id`
+- reserved bytes for forward compatibility
+- `RecordFrame` (variable-size):
+- frame magic/version
+- `frame_len`, `payload_len`
+- `commit_ordinal`
+- `source_pattern` (`Log`, `PublishSubscribe`, `Pipeline`)
+- `source_sequence` (mandatory for `log`; optional for other patterns via present flag)
+- source service/stage identity fields
+- `event_time_ns`, `commit_time_ns`
+- user header bytes length
+- payload bytes
+- checksum trailer (policy-dependent)
+- All record appends are 8-byte aligned to simplify scanning and future mmap-read views.
+- Record compatibility:
+- record header includes `record_kind`, `record_version`, `record_len`
+- unknown optional record kinds are skipped by `record_len`
+- unknown required record kinds fail decode
+
+Encoding rule:
+- `RecordFrame` fields `MUST` be encoded/decoded with explicit little-endian helpers.
+- Implementations `MUST NOT` use raw `repr(C)` transmute/cast decode for on-disk records.
+
+`record_kind` constants:
+- `1` = `Sample`
+- `2` = `Checkpoint`
+- `3` = `Seal`
+- `4` = `Padding`
+
+`record_version` policy:
+- `record_version` `MUST` be `1` for all v1 records.
+- Record versioning `MUST` follow the same major/minor semantics as file header versioning.
+- Higher major `MUST` be rejected; higher minor `MUST` be rejected unless explicitly supported.
+
+`RecordHeaderV1` minimal fields:
+
+```rust
+#[repr(C)]
+pub struct RecordHeaderV1 {
+    pub record_magic: [u8; 4],   // b"RCD1"
+    pub record_kind: u16,        // see constants above
+    pub record_version: u16,     // 1 for v1
+    pub record_len: u32,         // bytes including payload and checksum trailer
+    pub header_len: u16,         // bytes including future extension fields
+    pub flags: u16,              // record-local flags
+    pub record_crc32c: u32,      // crc over full record with this field zeroed
+}
+```
+
+Record conformance checks (mandatory):
+1. Reader `MUST` validate `record_magic == b"RCD1"`.
+2. Reader `MUST` validate `record_kind` is known or explicitly skippable by policy.
+3. Reader `MUST` validate `record_version` is supported.
+4. Reader `MUST` validate `record_len >= header_len`.
+5. Reader `MUST` validate `record_len % 8 == 0`.
+6. Reader `MUST` validate `next_offset = offset + record_len` does not exceed file length.
+7. Reader `MUST` validate `record_crc32c`.
+
+### Alignment and I/O Constraints
+- Record-level alignment: `record_len` `MUST` be 8-byte aligned.
+- File offset alignment: frame start offsets `MUST` be 8-byte aligned.
+- Segment size alignment: `segment_bytes` `SHOULD` be rounded up to a 2 MiB boundary.
+- Default I/O mode `SHOULD` be buffered file I/O.
+- Optional direct-I/O mode `MAY` be enabled only when all buffers, offsets, and lengths satisfy 4 KiB alignment.
+- Recorder `MUST` preallocate active segment files to `segment_bytes` before first append.
+- Recorder `SHOULD` keep at least one spare preallocated segment for roll handoff.
+- Recorder `SHOULD` preallocate the next metadata-log roll file in parallel with active writing.
+- Steady-state append path `MUST NOT` require file-size extension syscalls.
+- Async backend `SHOULD` prefer `io_uring` on supported Linux systems and `MUST` provide a fallback backend.
+- `io_uring` backend `SHOULD` support registered files and completion batching; it `MAY` support registered buffers and `SQPOLL` as optional tuning knobs.
+
+### Data Integrity (Checksums)
+- `RecordHeaderV1.record_crc32c` `MUST` be present for all record-framed files and verified during decode.
+- Recorder `MUST` always compute/store framing integrity via `record_crc32c`.
+- Recorder `MUST` write payload checksum trailers only when payload `checksum` policy is not `None`.
+- Replayer `MUST` verify `record_crc32c` always and payload checksum trailers when present.
+- Checksum policy is configurable:
+- `None` (for explicit performance-only deployments),
+- `Crc32c` (default; hardware-accelerated where available, software fallback otherwise),
+- `XxHash64` (optional throughput-focused alternative).
+- Throughput-oriented deployments `SHOULD` treat `record_crc32c` as required baseline integrity and set payload `checksum = None` unless stronger payload-level verification is required.
+- Integrity failures `MUST` return explicit corruption status with segment and sequence context.
+
+### Failure and Recovery Semantics
+- Torn write in active segment:
+- implementation `MUST` detect via invalid frame magic/len or checksum failure
+- implementation `MUST` truncate to last known-good frame boundary
+- implementation `MUST` mark a recovery event in metrics and admin status
+- Roll crash window:
+- if segment `.meta` seal marker is missing, implementation `MUST` treat the segment as active-recoverable
+- implementation `MUST` validate tail and either seal or truncate+seal
+- `commit.idxlog` replay:
+- implementation `MUST` idempotently rebuild missing metadata rows keyed by locator
+- implementation `MUST` use `commit_ordinal` for strict replay ordering
+- Recovery `MUST NOT` rewrite sealed segment payload bytes.
+
+### Random Access Contract
+- Locator API `MUST` be supported for all pattern adapters.
+- Sequence API `MUST` be supported when the adapter provides source sequence (`log` required; others optional):
+- Sequence API key is `(log_id, source_sequence)`.
+- Locator API (metadata-native): keyed by `(log_id, segment_id, segment_generation, file_offset, frame_len)`.
+- Replayer APIs `MUST` include:
+- `read_at_sequence(sequence)` (when sequence is available)
+- `read_range(sequence_start, sequence_end)` (when sequence is available)
+- `seek(sequence)` plus linear `next()` (when sequence is available)
+- `read_at_locator(locator)`
+- `read_many_locators(&[locator])`
+- Out-of-retention sequence `MUST` return explicit not-available status when sequence API is active.
+- Locator replay `SHOULD` be treated as the primary high-rate path.
+- Sequence replay `MUST` work without `segment.idx` via catalog + bounded frame scan when sequence API is active.
+- `segment.idx` `MAY` be used only to accelerate sequence lookups.
+
+### Replay Rate Modes
+- `AsFastAsPossible` (default): implementation `MUST` support replay as quickly as downstream accepts.
+- `WallClockRate`: implementation `SHOULD` support fixed target throughput (`messages/s` or `bytes/s`).
+- `EventTimeRate`: implementation `SHOULD` support replay according to event timestamps with configurable speed factor.
+- `BackpressureAware`: implementation `MUST` support replay that advances only when downstream demand is available.
+
+### Metadata Query Integration
+- Metadata `MUST` remain fully application-owned.
+- Query services `SHOULD` map attributes directly to locators.
+- Sequence `MAY` be stored as optional secondary key for range scans and integrity checks.
+- Locators `MUST` be treated as authoritative for archived reads after generation and bounds validation.
+- Query/read handoff `MAY` use a snapshot token or pin handle for deterministic replay.
+
+### Metadata WAL and Live Indexing Contract
+- `commit.idxlog` is the canonical metadata write-ahead-log (WAL); it is optimized for append/recovery, not direct ad-hoc query execution.
+- Deployments requiring near-real-time queries `MUST` support a continuous indexer mode that tails `commit.idxlog` while recording is active.
+- Query surfaces backed by an indexer `MUST` expose:
+- `last_commit_ordinal` (recorder durable metadata boundary),
+- `last_indexed_commit_ordinal` (queryable boundary),
+- `query_watermark = last_indexed_commit_ordinal`.
+- Queries requesting data beyond `query_watermark` `MUST` return explicit `NotIndexedYet` (or equivalent) rather than partial silent results.
+- Indexer progress `SHOULD` be persisted (`indexer.watermark` or equivalent durable state) for bounded restart catch-up.
+- `reindex` operations `MUST` be idempotent and resume from checkpoint/watermark.
+
+### Metadata Contract (Offset-First)
+- Required locator tuple for replay (`MUST`):
+- `log_id`, `segment_id`, `segment_generation`, `file_offset`, `frame_len`
+- Strongly recommended fields (`SHOULD`):
+- `commit_ordinal` (recovery checkpoint and strict ordering)
+- `sequence` (continuity diagnostics)
+- `checksum` and `checksum_kind` (early verification)
+- Replayer `MUST` validate:
+- segment generation exists and is not stale
+- `file_offset + frame_len` is within segment bounds
+- checksum/sequence match when provided by metadata service
+
+### Query Readiness Modes
+- `IndexerBacked`:
+- queries are served from external metadata index;
+- readiness is bounded by `query_watermark`.
+- `CoreLocatorIndex`:
+- queries are served from optional built-in `core-locator.idx` for sequence/time-range to locator resolution;
+- application-owned metadata enrichment remains external.
+- Implementations `MUST` report active query-readiness mode and current watermark in admin/CLI status.
+
+### Metadata Log Placement and Retention
+- Recorder `MUST` support configuring `metadata_log_path` independently from `data_storage_path`.
+- Recorder `MUST` support rolling metadata log files by size (`metadata_log_roll_bytes`).
+- Recorder `MUST` support a metadata log global size cap (`metadata_log_max_bytes`).
+- Default metadata-log retention policy `SHOULD` be `FollowDataRetention`.
+- Under `FollowDataRetention`, metadata log eviction `MUST NOT` remove commit records still required to rematerialize retained data segments.
+- If configuration causes metadata coverage to fall behind retained data, recorder/admin status `MUST` report degraded state.
+
+### Runtime Defaults (Initial)
+- Implementations `SHOULD` use the following runtime defaults:
+- `data_storage_path = "/var/lib/iox2/logs"` (platform-specific equivalent accepted).
+- `metadata_log_path = data_storage_path` (same volume by default).
+- `segment_bytes = 256 MiB` (rounded up to 2 MiB alignment).
+- `segment_preallocate = true`.
+- `spare_preallocated_segments = 1`.
+- `checksum = Crc32c`.
+- `async_io_backend = IoUringPreferred`.
+- `io_uring_queue_depth = 256`.
+- `io_submit_batch_max = 64`.
+- `io_cqe_batch_max = 128`.
+- `io_uring_register_files = true` (if supported by kernel/backend).
+- `commit_idxlog_checkpoint_interval = 4096`.
+- `metadata_log_roll_bytes = 1 GiB`.
+- `metadata_log_max_bytes = 32 GiB`.
+- `metadata_log_retention_policy = FollowDataRetention`.
+- metadata path defaults are defined in `log-archive-userland-metadata.md`.
+
+### Configuration Profiles (Preset + Overrides)
+- Recorder configuration `MUST` support named profiles:
+- `Durable`
+- `Balanced`
+- `Throughput`
+- `Replay`
+- Default profile `MUST` be `Balanced`.
+- Profile resolution order `MUST` be:
+1. load profile defaults
+2. apply explicit per-service overrides
+- Effective configuration is therefore `profile defaults + explicit overrides`.
+- Recorder startup `MUST` publish resolved effective configuration in status/log output, including active profile id.
+- Recorder startup `MUST` fail fast with explicit validation errors for unsafe or contradictory configurations.
+- Validation rules `MUST` include at least:
+- when `metadata_delivery_mode = Hybrid`, `metadata_queue_capacity > 0`
+- `io_submit_batch_max <= io_uring_queue_depth`
+- `io_cqe_batch_max <= 2 * io_uring_queue_depth`
+- when resolved mode is durability-first (`Durable` profile or explicit equivalent), `metadata_overflow_policy` `MUST NOT` be a dropping policy
+
+Profile baseline intents (initial):
+- `Durable`:
+- default `persistence_mode = Sync`
+- default metadata delivery preference `Hybrid`
+- default `metadata_overflow_policy = Block`
+- out-of-space policy remains `FailWriter`
+- `Balanced`:
+- default `persistence_mode = Async`
+- uses runtime defaults in `Runtime Defaults (Initial)`
+- `Throughput`:
+- default `persistence_mode = Async`
+- default metadata delivery preference `CommitLogOnly`
+- uses high-throughput tuning values from `Throughput Profile`
+- `Replay`:
+- default `persistence_mode = Async`
+- default metadata delivery preference `Hybrid`
+- prioritizes replay/query freshness over peak ingest throughput (smaller metadata lag targets, moderate ingest batching)
+
+Queue knob definitions (normative):
+- `io_uring_queue_depth` is the maximum in-flight async I/O operations for recorder data path submission/completion.
+- `metadata_queue_capacity` is the bounded pending metadata-event queue between recorder ingest and metadata/indexing sink.
+
+### Throughput Profile
+- Objective: sustain disk-bound recorder throughput on high-end hosts (for example 64-core systems with >=15 GiB/s aggregate write bandwidth).
+- Baseline assumptions:
+- recorder is `Async`,
+- metadata mode is `CommitLogOnly` for maximum ingest throughput (or `Hybrid` when query freshness is required),
+- framing integrity is `record_crc32c`; payload checksum is disabled unless explicitly required,
+- segment and metadata-log preallocation are enabled,
+- replay and indexing are isolated from recorder I/O workers.
+- Recommended high-throughput settings:
+- `io_uring_queue_depth >= 1024`
+- `io_submit_batch_max >= 256`
+- `io_cqe_batch_max >= 512`
+- `segment_bytes >= 1 GiB`
+- `spare_preallocated_segments >= 2`
+- `metadata_log_roll_bytes >= 4 GiB`
+- `metadata_queue_capacity >= 262144` (only when `Hybrid`)
+- `metadata_batch_max_records >= 1024` (only when `Hybrid`)
+- throughput validation is performed with batching flush (`100 ms` or batch-full).
+- CPU and NUMA placement are expected to be controlled externally (for example `taskset`/`numactl`, cpuset/cgroup, or service manager affinity settings), not by mandatory recorder-internal APIs.
+- Implementations `SHOULD` support external parallelism across multiple independent recorder instances/services; a single recorder stream is not required to saturate full device bandwidth.
+- Throughput claims `MUST` be validated with reproducible benchmark scripts on target filesystem/device profiles (XFS and ZFS configurations included in report metadata).
+- Throughput acceptance target for `Throughput` `SHOULD` be at least `80%` of the host-measured sequential-write baseline (`fio` or equivalent) under matched durability settings.
+
+### External Parallelism Model
+- Internal recorder sharding is out of scope for v2 baseline.
+- High-bandwidth deployments `SHOULD` scale via external striping/parallelism (for example RAID/ZFS striping and multiple independent log services/recorders).
+- Cross-recorder ordering is best-effort unless reconstructed by metadata/timestamp correlation.
+- Admin/CLI `SHOULD` support fleet-level aggregation via external tooling; per-recorder status remains first-class in core APIs.
+
+### Direct-I/O Enablement Criteria
+- Buffered I/O remains default for v2 baseline.
+- Direct-I/O `MUST` be manually enabled by explicit operator configuration; implementations `MUST NOT` auto-enable it.
+- Direct-I/O `MAY` be enabled only when benchmark evidence shows material gain (recommended threshold: `>=10%` sustained throughput increase or materially lower flush tail latency) on target deployment.
+- When direct-I/O is enabled, implementation `MUST` enforce alignment constraints and fail fast on invalid buffers/offsets.
+- Implementation `MUST` support fallback to buffered I/O with explicit status/error reporting when direct-I/O prerequisites are not met.
+
+### Filesystem and OS Profile Contracts
+- Performance qualification `MUST` record filesystem and OS profile used for results (filesystem type, mount/dataset options, kernel version, I/O scheduler, and device topology).
+- Reference deployment profiles `SHOULD` include at minimum:
+- high-speed NVMe on XFS,
+- large SSD pool configuration (for example ZFS) with documented record size and sync policy.
+- Throughput claims `MUST` reference the exact profile id used for measurement.
+- Implementations `MUST NOT` assume identical behavior across filesystems; profile-specific tuning is expected.
+
+### Retention and Overflow Interaction
+- In-memory overflow policy (`Block`, `DropNewest`, `DropOldest`) applies to live log delivery semantics and `MUST NOT` retroactively change already durable archived bytes.
+- Global size cap enforcement `MUST` use deterministic oldest-first eviction of sealed segments, unless blocked by active replay pins/snapshots.
+- Lagging replay sessions `MUST` be protected by pin/snapshot constraints until released or timed out by policy.
+- Retention `MUST` be globally arbitrated across tiers, with one deterministic eviction decision function.
+
+### Tiered Storage
+- Tier 0: in-memory ring.
+- Tier 1 (`HOT_ATTACHED`): active + sealed segments immediately available for replay/query.
+- Tier 2 (`COLD_DETACHED`): sealed segments moved to colder storage and detached from default hot query/replay path.
+- Tiering objective in v2 is archive-style cold storage for detached sealed segments (not transparent multi-tier live caching).
+- Detach/attach semantics:
+- only sealed segments `MAY` be detached;
+- detached segments `MUST` keep stable locator identity (`segment_id`, `segment_generation`, `file_offset`);
+- hot catalog `MUST` record detached location/tier state;
+- attach operation `MUST` make selected detached segments query/replay eligible again;
+- delete operation `MUST` apply only to detached segments.
+- Replay/query behavior:
+- default replay/query scope `SHOULD` be `HOT_ATTACHED` segments;
+- default detached access policy is `ExplicitAttachRequired`;
+- archive-aware direct reads `MAY` be added as an optional non-default mode in later phases;
+- not-attached detached requests `MUST` return explicit not-available/deferred status.
+- Detached candidate selection defaults:
+- policy name: `ColdOldestUnpinnedFirst`.
+- eligibility: segment is `sealed`, not pinned by replay/snapshot, not active, and currently `HOT_ATTACHED`.
+- detach trigger watermark: start at `85%` hot-tier capacity.
+- detach stop watermark: stop at `75%` hot-tier capacity.
+- per-operation detach batch cap: `32` segments.
+- default scoring weights:
+- `age_weight = 0.6`
+- `read_heat_weight = 0.3` (prefer detaching colder segments first)
+- `size_weight = 0.1`
+
+### Replay Safety Metadata (Minimum Set)
+- `segment_id`
+- `segment_generation`
+- `sequence_start`
+- `sequence_end`
+- `created_timestamp`
+- `sealed_timestamp` (if sealed)
+- `checksum_policy`
+- `segment_checksum` (or per-record checksum marker reference)
+- `payload_schema_id`
+- `tier_location`
+
+## Aeron-Derived Notes
+- Keep hot path and archive control path separated.
+- Keep logical identity (`sequence`) and physical locator identity distinct.
+- Prefer fixed-size segment files with deterministic rolling.
+- Maintain compact immutable segment catalog metadata for replay resolution.
+- Use explicit persistence commit protocol for crash-safe truncation/recovery.
+- Use replay sessions with progress counters for observability/control.
+- Base retention on active replay pins/snapshots to prevent invalid deletes.
+- Treat locator validation as mandatory (generation + bounds + optional checksum).
+- Keep admin commands idempotent (`start_recorder`, `stop_recorder`, `trim_before`, `replay_from`).
+
+## Control Surface Decision
+- Recorder/replayer lifecycle and retention controls are exposed through a dedicated log-admin control surface.
+- Data-plane builder stays focused on log creation/open and port creation; admin operations are separated to avoid API bloat.
+
+## CLI Control Surface (Planned)
+- An `iox2` CLI control path `MUST` be provided for recorder lifecycle and retention operations.
+- CLI control `MUST` call the log-admin control surface and `MUST NOT` mutate archive files directly.
+- CLI commands `MUST` be idempotent and return deterministic exit status.
+- Initial command set (`iox2 service ...`):
+- `log-recorder start --service <name> [--storage-path ... --metadata-log-path ... --segment-bytes ... --max-disk-bytes ... --metadata-log-max-bytes ... --metadata-log-roll-bytes ... --checksum ... --mode ... --profile durable|balanced|throughput|replay --metadata-delivery-mode direct-sink|commit-log-only|hybrid --metadata-overflow-policy block|drop-newest --io-uring-queue-depth ... --io-submit-batch-max ... --io-cqe-batch-max ... --segment-preallocate --spare-preallocated-segments ...]`
+- `log-recorder stop --service <name>`
+- `log-recorder status --service <name>`
+- `log-recorder flush --service <name>`
+- `log-recorder trim --service <name> --before-sequence <seq>`
+- `log-recorder trim --service <name> --before-time-ns <ts>`
+- `log-recorder detach --service <name> --before-sequence <seq>`
+- `log-recorder attach --service <name> --from-archive <archive_id> [--sequence-range ...]`
+- `log-recorder delete-detached --service <name> [--before-sequence <seq>]`
+- `status` output `MUST` include:
+- recorder state (`running|stopped|degraded`)
+- active segment id/generation
+- durable commit ordinal
+- last indexed commit ordinal
+- query watermark
+- query readiness mode (`IndexerBacked|CoreLocatorIndex|Unavailable`)
+- retained bytes
+- active recorder profile
+- preallocation health (`ready|degraded`)
+- metadata log path
+- metadata log retained bytes
+- metadata lag
+- last error (if any)
+- Commands `SHOULD` support existing CLI output formats (`RON`, `JSON`, human-readable).
+- `start` and `stop` `MUST` be safe to invoke repeatedly.
+- `flush` in `Async` mode `MUST` block until durable boundary is reached or fail with explicit timeout/error.
+
+## Observability and Metrics (Planned)
+- Recorder counters:
+- appended records/bytes
+- durable records/bytes
+- segment roll count
+- segment preallocation stall count
+- truncation recovery count
+- checksum failure count
+- metadata enqueue success/drop/block counts
+- `io_uring` submit stall count
+- `io_uring` completion backlog high-watermark
+- Replayer counters:
+- locator read count
+- sequence read count
+- not-available count
+- corruption detection count
+- Admin gauges:
+- active segment id/generation
+- retained bytes by tier
+- oldest/newest retained sequence
+- metadata lag (`last_durable_commit_ordinal - last_indexed_commit_ordinal`)
+- `query_watermark` (`last_indexed_commit_ordinal`)
+- `query_readiness_mode`
+- per-recorder append throughput (`bytes/s`, `records/s`)
+
+## Proposed V2 API Direction
+```rust
+let log = node
+    .service_builder(&"Telemetry/Log".try_into()?)
+    .log::<[u8]>()
+    .open_or_create()?;
+
+let admin = log.admin_builder().open()?;
+
+let recorder = admin.recorder_builder()
+    .persistence_mode(PersistenceMode::Async)
+    .profile(RecorderProfile::Throughput)
+    .async_io_backend(AsyncIoBackend::IoUringPreferred)
+    .storage_path("/var/lib/iox2/logs")
+    .segment_bytes(1024 * 1024 * 1024)
+    .segment_preallocate(true)
+    .spare_preallocated_segments(2)
+    .max_disk_bytes(32 * 1024 * 1024 * 1024)
+    .checksum(Checksum::None) // payload checksum; framing CRC remains enabled
+    .metadata_delivery_mode(MetadataDeliveryMode::CommitLogOnly)
+    .io_uring_queue_depth(1024)
+    .io_submit_batch_max(256)
+    .io_cqe_batch_max(512)
+    .start()?;
+
+let replayer = admin.replayer_builder().open()?;
+let snapshot = replayer.begin_snapshot()?;
+let sample = replayer.read_at_with_snapshot(42, snapshot)?;
+let by_locator = replayer.read_at_locator(locator)?;
+```
+
+## Validation Plan
+- Recovery tests:
+- crash during segment write,
+- crash during segment roll,
+- checkpoint + tail scan correctness.
+- checksum mismatch detection and recovery behavior.
+
+- Replay tests:
+- `read_at`, `read_range`, `seek` behavior,
+- out-of-retention not-available behavior,
+- replay under concurrent roll/trim.
+- checksum verification failures and error surfacing.
+
+- Metadata integration tests:
+- query returns locator set,
+- locator validation and stale-generation rejection behavior,
+- snapshot token consistency during retention churn.
+
+- Operational tests:
+- retention trim under global cap,
+- tier promotion/eviction correctness,
+- replay lag and pin pressure behavior.
+- async backend parity (`io_uring` vs fallback backend) for ordering, durability semantics, and error propagation.
+- bounded in-flight behavior under sustained write pressure.
+- separate-volume operation (`data_storage_path` != `metadata_log_path`) including failure isolation and degraded-state reporting.
+- CLI control tests:
+- `start/stop/status/flush/trim` behavior and exit codes
+- idempotency under repeated invocations
+- degraded-state error reporting
+
+### Performance Validation Targets
+- Sustained append throughput in `Async` and `Sync` modes.
+- Sustained append throughput in `Throughput` profile with `CommitLogOnly`.
+- Relative throughput target: `Throughput` `SHOULD` reach `>=80%` of host sequential-write baseline under matched durability settings.
+- Ack-level latency envelopes:
+- `Accepted`, `DurableData`, and `DurableDataAndCommitLog` p50/p99 under steady load.
+- Replay latency p50/p99 for:
+- `read_at_sequence(sequence)` (for sequence-capable adapters)
+- `read_at_locator(locator)`
+- Recovery time objective:
+- cold start with 1 active + N sealed segments
+- metadata catch-up from `commit.idxlog`
+- Recovery-time scaling envelope:
+- measured as retained-bytes and segment-count increase.
+- Backpressure behavior:
+- bounded memory under stalled storage backend
+- bounded memory under stalled metadata backend
+- Metadata amplification delta:
+- compare recorder throughput for `CommitLogOnly` vs `Hybrid` on identical ingest workload.
+- Write amplification reporting:
+- verify amplification ratio accounting in status/metrics for each profile.
+- Preallocation correctness:
+- no steady-state append path calls that extend segment size after warm-up.
+- Replay isolation:
+- recorder throughput/latency under concurrent replay load with configured replay I/O budget.
+- Multi-recorder external scaling:
+- aggregate throughput across multiple independent recorders on striped storage.
+
+## Decisions to Freeze Before Implementation
+- [x] Recorder scope across messaging patterns:
+- recorder core is pattern-neutral and must support `log`, `publish_subscribe`, and `pipeline` via adapters.
+- [x] Internal recorder sharding in core v2:
+- deferred; v2 uses external parallelism/striping and multiple independent recorders.
+- [x] Direct-I/O policy:
+- manual explicit opt-in only; never auto-enabled.
+- [x] Tiering semantics:
+- cold storage is modeled as detached sealed segments with explicit attach/detach/delete lifecycle.
+- [x] Metadata query readiness:
+- query watermark contract (`last_commit_ordinal`, `last_indexed_commit_ordinal`, `NotIndexedYet`) is required.
+- [x] Default out-of-space failure policy:
+- `FailWriter` is the default for v2.
+- [x] Default detached access behavior:
+- `ExplicitAttachRequired` is the default; detached reads require explicit attach.
+- [x] Recovery-time SLO numbers:
+- `target_recovery_time <= 5s + 0.5ms * sealed_segment_count`, soft cap `60s`, degraded at `2x target`.
+- [x] Ack timeout defaults:
+- `wait_durable_data_timeout=1s`, `wait_durable_data_and_commitlog_timeout=2s`, `ack_poll_interval=1ms`, `flush_cli_timeout=30s`.
+- [x] Detached-segment selection heuristic:
+- `ColdOldestUnpinnedFirst` with 85%/75% hysteresis and default weights (`age=0.6`, `read_heat=0.3`, `size=0.1`).
+
+## Detailed Implementation Plan
+
+### Phase 0 - File Format and Contracts
+- Define binary structs for:
+- segment header
+- frame header
+- optional accelerator index entry (`segment.idx`)
+- catalog entry
+- commit-log entry
+- Define forward-compatibility/versioning policy.
+- Freeze locator validation rules.
+- Freeze pattern-adapter ingest contract (`log`, `publish_subscribe`, `pipeline`) and source-identity fields.
+- Freeze ack-level contract (`Accepted`, `DurableData`, `DurableDataAndCommitLog`) and timeout/error semantics.
+- Freeze crash/power-loss contract by persistence mode and ack level.
+- Freeze out-of-space failure policy and degraded-state transitions.
+- Freeze runtime defaults and replay-rate mode semantics.
+
+**Exit Criteria**
+- Format spec reviewed and accepted.
+- Golden binary fixtures committed.
+- Version-compatibility tests for major/minor and must-understand flags committed.
+- Ack-level and crash-contract conformance tests committed.
+- Pattern-adapter contract tests committed (log required; pub/sub and pipeline fixture compatibility).
+- Replay-rate conformance tests committed (`AsFastAsPossible`, paced modes).
+
+### Phase 1 - Recorder Core (Completed 2026-02-08)
+- Implement segment `.data` writer with aligned append.
+- Implement rolling and `.meta` seal flow.
+- Implement segment and metadata-log preallocation with spare-segment handoff.
+- Implement `Volatile`, `Async`, `Sync` durability modes.
+- Add checksum write path.
+- Implement failure-policy actions for out-of-space and preallocation failure.
+- Implement bytes-written accounting and amplification ratio metrics.
+- Implement `log` pattern adapter on top of recorder core ingest contract.
+
+**Exit Criteria**
+- Crash-safe append+roll tests pass.
+- No unbounded allocation under sustained append.
+- Out-of-space behavior matches configured failure policy with explicit status/errors.
+- Log-adapter ingest conformance tests pass.
+
+### Phase 2 - Replayer Core (Completed 2026-02-08)
+- Implement sequence replay APIs (`read_at_sequence`, `read_range`, `seek/next`) for sequence-capable adapters.
+- Implement `read_at_locator` and `read_many_locators`.
+- Implement checksum verification and corruption error types.
+- Implement replay I/O budget controls required for ingest isolation.
+
+**Exit Criteria**
+- Replay API behavior tests pass.
+- Locator validation tests pass.
+- Recorder ingest throughput remains within configured degradation envelope under concurrent replay.
+
+### Phase 3 - Recovery and Checkpointing
+- Implement startup recovery:
+- catalog load
+- active segment tail scan+truncate
+- commit-log replay hooks
+- Implement deterministic recovery metrics and admin status.
+
+**Exit Criteria**
+- Fault-injection crash matrix passes.
+- Recovery time envelope is measured and documented.
+
+### Phase 4 - Retention and Tier Arbitration
+- Implement global retention arbiter with size cap.
+- Add detached cold-segment lifecycle (detach/attach/delete) and tier-state tracking.
+- Enforce replay pin/snapshot constraints during trim.
+
+**Exit Criteria**
+- Retention determinism tests pass.
+- No invalid delete while pinned replay sessions exist.
+
+### Phase 5 - Metadata Integration and Tooling
+- Publish metadata schema contract keyed by locator.
+- Implement continuous `commit.idxlog` live-indexer mode with durable watermark tracking.
+- Implement query watermark reporting (`last_commit_ordinal`, `last_indexed_commit_ordinal`).
+- Implement optional `core-locator.idx` path for immediate locator queries without external DB dependency.
+- Provide SQLite reference sink for `commit.idxlog` or async sink path.
+- Add end-to-end query-to-replay example and troubleshooting guidance.
+
+**Exit Criteria**
+- Metadata lag/catch-up tests pass.
+- Live indexer restart/catch-up preserves monotonic watermark and idempotent indexing.
+- Query requests beyond watermark return explicit `NotIndexedYet` behavior.
+- Example demonstrates offset-first rematerialization.
+
+### Phase 6 - Hardening and Performance
+- Run backend parity tests (`io_uring` and fallback).
+- Add large-scale soak tests and corruption-injection tests.
+- Add `Throughput` profile benchmarks (single-recorder and multi-recorder external scaling).
+- Finalize observability dashboard fields and admin commands.
+
+**Exit Criteria**
+- Throughput/latency targets documented with reproducible benchmark scripts.
+- No unresolved data-loss or corruption bugs.
+
+### Phase 7 - CLI and Operations UX
+- Add `iox2 service log-recorder` command group on top of log-admin APIs.
+- Implement `start`, `stop`, `status`, `flush`, `trim`, `detach`, `attach`, and `delete-detached`.
+- Add machine-readable output schemas for `status`.
+- Add end-to-end CLI tests and help text/documentation.
+
+**Exit Criteria**
+- CLI commands are idempotent and pass end-to-end tests.
+- Status output contains required operational fields.
+- CLI behavior is documented in `iceoryx2-cli` help and README updates.
+
+### Phase 8 - Additional Pattern Adapters
+- Implement `publish_subscribe` adapter on recorder core ingest contract.
+- Implement `pipeline` adapter on recorder core ingest contract.
+- Add adapter-specific metadata/source-identity mapping tests.
+- Add end-to-end record/replay validation for `publish_subscribe` and `pipeline`.
+
+**Exit Criteria**
+- Pub/Sub adapter conformance tests pass.
+- Pipeline adapter conformance tests pass.
+- Cross-pattern query/readiness reporting is consistent and documented.
+
+## Resolved Decisions
+- Default persistence mode is `Async`; `Sync` is opt-in for stricter durability.
+- Recorder/replayer controls live in a dedicated log-admin control surface.
+- Retention is globally arbitrated across tiers.
+- Minimum replay-safety segment metadata is defined in `Replay Safety Metadata (Minimum Set)`.
+- Mmap-based replay views are deferred until after functional replay stability.
+- Checksum policy is configured per service instance in v2 (not per segment generation).
+- Default checksum policy is `Crc32c` with runtime hardware acceleration and software fallback.
+- Async recorder implementation is `io_uring`-first on Linux with mandatory fallback backend for non-supporting environments.
+- `RecordFrame` encoding uses explicit little-endian helpers (no raw struct casts for on-disk decode).
+- `segment.idx` is optional and disabled by default in v2 baseline.
+- `read_many_locators` preserves input order.
+- Default replay mode is `AsFastAsPossible`; paced replay modes are opt-in.
+- Recorder control is exposed through `iox2 service log-recorder` commands backed by log-admin APIs.
+- Recorder supports independent `metadata_log_path` (including separate volume) with independent roll and size-cap controls.
+- High-throughput `Throughput` profile prioritizes recorder ingest throughput (`Async`, preallocation, deep batching) over immediate metadata freshness.
+- Maximum ingest recommendation is `CommitLogOnly`; `Hybrid` is available when metadata freshness is required.
+- Record framing integrity (`record_crc32c`) is mandatory; payload checksum policy is independently configurable.
+- Segment growth in steady state is prevented via preallocation requirements.
+- Direct-I/O is optional, manual-only, and enabled only with benchmark-validated benefit and strict alignment conformance.
+- Ack-level semantics, crash/power-loss semantics, out-of-space policy, replay isolation, and write-amplification accounting are treated as core architecture contracts.
+- `commit.idxlog` is the canonical metadata WAL; query readiness is governed by explicit indexing watermarks.
+- Internal recorder sharding is deferred from v2; scaling is via external parallelism/striping and multiple recorder instances.
+- Tiering in v2 is based on detached sealed segments for cold storage management.
+- Default detached access policy is `ExplicitAttachRequired`.
+- Default out-of-space failure policy is `FailWriter`.
+- Recorder core is pattern-neutral and uses adapters for `log`, `publish_subscribe`, and `pipeline` (log first in implementation order).
+
+## Open Items
+- None for architecture defaults; remaining work is implementation and validation.
