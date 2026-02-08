@@ -585,6 +585,11 @@ Queue knob definitions (normative):
 - `log-recorder detach --service <name> --before-sequence <seq>`
 - `log-recorder attach --service <name> --from-archive <archive_id> [--sequence-range ...]`
 - `log-recorder delete-detached --service <name> [--before-sequence <seq>]`
+- Introspection command set (`MUST`):
+- `log-recorder list-segments --service <name> [--sealed-only] [--detached-only]`
+- `log-recorder inspect-commit-log --service <name> [--from-ordinal <ordinal>] [--limit <n>]`
+- `log-recorder inspect-record --service <name> --at-sequence <seq>`
+- `log-recorder inspect-record --service <name> --at-locator <segment_id>:<generation>:<offset>:<len>`
 - `status` output `MUST` include:
 - recorder state (`running|stopped|degraded`)
 - active segment id/generation
@@ -602,6 +607,9 @@ Queue knob definitions (normative):
 - Commands `SHOULD` support existing CLI output formats (`RON`, `JSON`, human-readable).
 - `start` and `stop` `MUST` be safe to invoke repeatedly.
 - `flush` in `Async` mode `MUST` block until durable boundary is reached or fail with explicit timeout/error.
+- Introspection commands `MUST` return deterministic `NotAvailable` style errors for out-of-retention sequence/locator targets.
+- Introspection commands `MUST` support machine-readable output parity with `status` (`RON`, `JSON`) and stable field names.
+- Introspection payload rendering `MAY` be truncated by default for terminal safety; machine-readable output `MUST` include full locator and frame-length fields.
 
 ## Observability and Metrics (Planned)
 - Recorder counters:
@@ -808,7 +816,7 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Recovery emits deterministic status fields (last durable sequence/ordinal, truncation events, degraded reason when applicable).
 - Recovery-time SLO evidence is captured and committed for multiple segment counts and retained byte sizes, with pass/fail against the documented formula.
 
-### Phase 4 - Retention and Tier Arbitration
+### Phase 4 - Retention and Tier Arbitration (Completed 2026-02-08)
 - Implement global retention arbiter with size cap.
 - Add detached cold-segment lifecycle (detach/attach/delete) and tier-state tracking.
 - Enforce replay pin/snapshot constraints during trim.
@@ -852,14 +860,17 @@ let by_locator = replayer.read_at_locator(locator)?;
 ### Phase 7 - CLI and Operations UX
 - Add `iox2 service log-recorder` command group on top of log-admin APIs.
 - Implement `start`, `stop`, `status`, `flush`, `trim`, `detach`, `attach`, and `delete-detached`.
+- Implement `list-segments`, `inspect-commit-log`, and `inspect-record` introspection commands.
 - Add machine-readable output schemas for `status`.
 - Add end-to-end CLI tests and help text/documentation.
 
 **Exit Criteria**
 - End-to-end CLI tests pass for `start`, `stop`, `status`, `flush`, `trim`, `detach`, `attach`, and `delete-detached`.
+- End-to-end CLI tests pass for `list-segments`, `inspect-commit-log`, `inspect-record --at-sequence`, and `inspect-record --at-locator`.
 - Idempotency tests pass for repeated lifecycle and retention operations.
 - Machine-readable output schema is versioned, validated by tests, and stable for documented fields.
 - CLI exit codes are deterministic and mapped to documented error classes.
+- CLI tests verify deterministic not-available errors for out-of-retention sequence/locator introspection requests.
 - Operator documentation is updated with command semantics, examples, and failure-mode troubleshooting.
 
 ### Phase 8 - Additional Pattern Adapters
