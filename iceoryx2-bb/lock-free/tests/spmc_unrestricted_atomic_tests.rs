@@ -402,6 +402,16 @@ fn spmc_unrestricted_atomic_internal_size_and_alignment_calculation_with_integer
 }
 
 #[test]
+fn spmc_unrestricted_atomic_mgmt_is_cache_line_aligned_and_separated_from_payload() {
+    let atomic = UnrestrictedAtomic::<u8>::new(0);
+    let mgmt_ptr = atomic.__internal_get_mgmt() as *const _ as usize;
+    let payload_ptr = atomic.__internal_get_data_ptr() as usize;
+
+    assert_that!(core::mem::align_of_val(atomic.__internal_get_mgmt()), ge 64);
+    assert_that!(payload_ptr - mgmt_ptr, ge 64);
+}
+
+#[test]
 fn spmc_unrestricted_atomic_mgmt_get_write_cell_works() {
     let _test_lock = TEST_LOCK.lock().unwrap();
 

@@ -12,6 +12,8 @@
 
 //! A **threadsafe** **lock-free** more generic alternative of the atomic. Can hold any arbitrary
 //! type but is restricted to single producer multi consumer.
+//! Under sustained producer writes, readers may need to retry and are therefore not strictly
+//! wait-free.
 //!
 //! # Example
 //!
@@ -92,6 +94,7 @@ unsafe impl<T: Copy> Send for Producer<'_, T> {}
 unsafe impl<T: Copy> Sync for Producer<'_, T> {}
 
 #[doc(hidden)]
+#[repr(align(64))]
 #[repr(C)]
 pub struct UnrestrictedAtomicMgmt {
     write_cell: AtomicU64,
@@ -332,6 +335,8 @@ impl<T: Copy> UnrestrictedAtomic<T> {
     }
 
     /// Loads the underlying value and returns a copy of it.
+    /// In the presence of continuous concurrent writes this operation may retry and is lock-free
+    /// but not wait-free.
     pub fn load(&self) -> T {
         let mut return_value: MaybeUninit<T> = MaybeUninit::uninit();
         unsafe {
