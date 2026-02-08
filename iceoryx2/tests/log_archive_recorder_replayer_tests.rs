@@ -424,6 +424,319 @@ fn log_archive_replayer_reads_entries_while_metadata_log_has_preallocated_zero_t
 }
 
 #[test]
+fn log_archive_open_or_recover_recovers_unsealed_archive_and_continues() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    {
+        let mut recorder = ArchiveRecorderBuilder::new(&storage_path)
+            .metadata_log_path(&metadata_path)
+            .segment_bytes(2048)
+            .segment_preallocate(false)
+            .spare_preallocated_segments(0)
+            .persistence_mode(PersistenceMode::Async)
+            .checksum_mode(ChecksumMode::Crc32c)
+            .create()
+            .unwrap();
+        for sequence in 1..=3u64 {
+            recorder
+                .append_log_record(LogRecordInput {
+                    sequence,
+                    event_time_ns: sequence * 10,
+                    user_header: &[0x10, 0x20],
+                    payload: &[sequence as u8; 12],
+                })
+                .unwrap();
+        }
+        recorder.flush().unwrap();
+    }
+
+    let mut recovered = ArchiveRecorderBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .segment_bytes(2048)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .persistence_mode(PersistenceMode::Async)
+        .checksum_mode(ChecksumMode::Crc32c)
+        .open_or_recover()
+        .unwrap();
+    let recovery_status = recovered.recovery_status();
+    assert_that!(recovery_status.recovered_existing_archive, eq true);
+    assert_that!(recovery_status.commit_entries_loaded, eq 3);
+
+    recovered
+        .append_log_record(LogRecordInput {
+            sequence: 4,
+            event_time_ns: 40,
+            user_header: &[0x33, 0x44],
+            payload: &[0x55; 12],
+        })
+        .unwrap();
+    recovered.finalize().unwrap();
+
+    let replayer = ArchiveReplayerBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .open()
+        .unwrap();
+    let replayed = replayer
+        .read_range(1, NonZeroUsize::new(8).unwrap())
+        .unwrap();
+    assert_that!(replayed.len(), eq 4);
+    assert_that!(replayed[0].sequence, eq 1);
+    assert_that!(replayed[1].sequence, eq 2);
+    assert_that!(replayed[2].sequence, eq 3);
+    assert_that!(replayed[3].sequence, eq 4);
+}
+
+#[test]
+fn log_archive_open_or_recover_supports_sync_mode_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    {
+        let mut recorder = ArchiveRecorderBuilder::new(&storage_path)
+            .metadata_log_path(&metadata_path)
+            .segment_bytes(2048)
+            .segment_preallocate(false)
+            .spare_preallocated_segments(0)
+            .persistence_mode(PersistenceMode::Sync)
+            .checksum_mode(ChecksumMode::Crc32c)
+            .create()
+            .unwrap();
+        recorder
+            .append_log_record(LogRecordInput {
+                sequence: 1,
+                event_time_ns: 11,
+                user_header: &[0x44, 0x55],
+                payload: &[0x66; 12],
+            })
+            .unwrap();
+    }
+
+    let mut recovered = ArchiveRecorderBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .segment_bytes(2048)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .persistence_mode(PersistenceMode::Sync)
+        .checksum_mode(ChecksumMode::Crc32c)
+        .open_or_recover()
+        .unwrap();
+    let recovery_status = recovered.recovery_status();
+    assert_that!(recovery_status.recovered_existing_archive, eq true);
+    assert_that!(recovery_status.commit_entries_loaded, eq 1);
+
+    recovered
+        .append_log_record(LogRecordInput {
+            sequence: 2,
+            event_time_ns: 22,
+            user_header: &[0x77, 0x88],
+            payload: &[0x99; 12],
+        })
+        .unwrap();
+    recovered.finalize().unwrap();
+
+    let replayer = ArchiveReplayerBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .open()
+        .unwrap();
+    let replayed = replayer
+        .read_range(1, NonZeroUsize::new(4).unwrap())
+        .unwrap();
+    assert_that!(replayed.len(), eq 2);
+    assert_that!(replayed[0].sequence, eq 1);
+    assert_that!(replayed[1].sequence, eq 2);
+}
+
+#[test]
+fn log_archive_open_or_recover_truncates_active_segment_corrupted_tail() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    let segment_path = {
+        let mut recorder = ArchiveRecorderBuilder::new(&storage_path)
+            .metadata_log_path(&metadata_path)
+            .segment_bytes(2048)
+            .segment_preallocate(false)
+            .spare_preallocated_segments(0)
+            .persistence_mode(PersistenceMode::Async)
+            .checksum_mode(ChecksumMode::Crc32c)
+            .create()
+            .unwrap();
+        let commit = recorder
+            .append_log_record(LogRecordInput {
+                sequence: 1,
+                event_time_ns: 10,
+                user_header: &[0x10],
+                payload: &[0x22; 8],
+            })
+            .unwrap();
+        recorder.flush().unwrap();
+        storage_path.join(format!(
+            "segments/segment-{}-g{}.data",
+            commit.locator.segment_id, commit.locator.segment_generation
+        ))
+    };
+
+    let mut segment_file = OpenOptions::new().append(true).open(&segment_path).unwrap();
+    segment_file
+        .write_all(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01, 0x02])
+        .unwrap();
+    segment_file.flush().unwrap();
+
+    let mut recovered = ArchiveRecorderBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .segment_bytes(2048)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .persistence_mode(PersistenceMode::Async)
+        .checksum_mode(ChecksumMode::Crc32c)
+        .open_or_recover()
+        .unwrap();
+    let recovery_status = recovered.recovery_status();
+    assert_that!(recovery_status.segment_truncated_bytes > 0, eq true);
+
+    recovered
+        .append_log_record(LogRecordInput {
+            sequence: 2,
+            event_time_ns: 20,
+            user_header: &[0x11],
+            payload: &[0x33; 8],
+        })
+        .unwrap();
+    recovered.finalize().unwrap();
+
+    let replayer = ArchiveReplayerBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .open()
+        .unwrap();
+    let replayed = replayer
+        .read_range(1, NonZeroUsize::new(4).unwrap())
+        .unwrap();
+    assert_that!(replayed.len(), eq 2);
+    assert_that!(replayed[0].sequence, eq 1);
+    assert_that!(replayed[1].sequence, eq 2);
+}
+
+#[test]
+fn log_archive_open_or_recover_truncates_partial_commit_log_tail() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    {
+        let mut recorder = ArchiveRecorderBuilder::new(&storage_path)
+            .metadata_log_path(&metadata_path)
+            .segment_bytes(2048)
+            .segment_preallocate(false)
+            .spare_preallocated_segments(0)
+            .persistence_mode(PersistenceMode::Async)
+            .checksum_mode(ChecksumMode::Crc32c)
+            .create()
+            .unwrap();
+        recorder
+            .append_log_record(LogRecordInput {
+                sequence: 1,
+                event_time_ns: 5,
+                user_header: &[0x01],
+                payload: &[0x02; 8],
+            })
+            .unwrap();
+        recorder.flush().unwrap();
+    }
+
+    let commit_log_path = metadata_path.join("commit.idxlog");
+    let mut commit_log_file = OpenOptions::new()
+        .append(true)
+        .open(&commit_log_path)
+        .unwrap();
+    commit_log_file
+        .write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0xFA])
+        .unwrap();
+    commit_log_file.flush().unwrap();
+
+    let mut recovered = ArchiveRecorderBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .segment_bytes(2048)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .persistence_mode(PersistenceMode::Async)
+        .checksum_mode(ChecksumMode::Crc32c)
+        .open_or_recover()
+        .unwrap();
+    let recovery_status = recovered.recovery_status();
+    assert_that!(recovery_status.commit_log_truncated_bytes > 0, eq true);
+    assert_that!(recovery_status.commit_entries_loaded, eq 1);
+
+    recovered
+        .append_log_record(LogRecordInput {
+            sequence: 2,
+            event_time_ns: 6,
+            user_header: &[0x03],
+            payload: &[0x04; 8],
+        })
+        .unwrap();
+    recovered.finalize().unwrap();
+
+    let replayer = ArchiveReplayerBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .open()
+        .unwrap();
+    let replayed = replayer
+        .read_range(1, NonZeroUsize::new(4).unwrap())
+        .unwrap();
+    assert_that!(replayed.len(), eq 2);
+    assert_that!(replayed[0].sequence, eq 1);
+    assert_that!(replayed[1].sequence, eq 2);
+}
+
+#[test]
+fn log_archive_open_or_recover_loads_catalog_from_rolled_segments() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage_path = temp.path().join("archive");
+    let metadata_path = temp.path().join("metadata");
+
+    {
+        let mut recorder = ArchiveRecorderBuilder::new(&storage_path)
+            .metadata_log_path(&metadata_path)
+            .segment_bytes(256)
+            .segment_preallocate(false)
+            .spare_preallocated_segments(0)
+            .persistence_mode(PersistenceMode::Async)
+            .checksum_mode(ChecksumMode::Crc32c)
+            .create()
+            .unwrap();
+        for sequence in 1..=12u64 {
+            recorder
+                .append_log_record(LogRecordInput {
+                    sequence,
+                    event_time_ns: sequence * 2,
+                    user_header: &[0x21, 0x22],
+                    payload: &[sequence as u8; 16],
+                })
+                .unwrap();
+        }
+        recorder.flush().unwrap();
+    }
+
+    let recovered = ArchiveRecorderBuilder::new(&storage_path)
+        .metadata_log_path(&metadata_path)
+        .segment_bytes(256)
+        .segment_preallocate(false)
+        .spare_preallocated_segments(0)
+        .persistence_mode(PersistenceMode::Async)
+        .checksum_mode(ChecksumMode::Crc32c)
+        .open_or_recover()
+        .unwrap();
+    let recovery_status = recovered.recovery_status();
+    assert_that!(recovery_status.catalog_segments_loaded > 0, eq true);
+    assert_that!(recovery_status.recovered_existing_archive, eq true);
+}
+
+#[test]
 fn log_archive_volatile_mode_avoids_disk_artifacts() {
     let temp = tempfile::tempdir().unwrap();
     let storage_path = temp.path().join("volatile_archive");

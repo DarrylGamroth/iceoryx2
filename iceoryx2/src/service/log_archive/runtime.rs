@@ -18,7 +18,7 @@ use std::fmt::{Display, Formatter};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
     ArchiveFileHeaderError, ArchiveFileHeaderV1, ArchiveFileKind, ARCHIVE_FILE_HEADER_V1_LEN,
@@ -150,6 +150,31 @@ impl ArchiveRecorderStats {
     }
 }
 
+/// Deterministic startup recovery status for recorder admin surfaces.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct ArchiveRecoveryStatus {
+    /// True when recorder was opened from an existing archive and recovery ran.
+    pub recovered_existing_archive: bool,
+    /// Number of segment summaries loaded from catalog.
+    pub catalog_segments_loaded: u64,
+    /// Number of valid commit-log entries loaded.
+    pub commit_entries_loaded: u64,
+    /// Active segment id selected after recovery.
+    pub active_segment_id: u64,
+    /// Active segment generation selected after recovery.
+    pub active_segment_generation: u32,
+    /// Number of committed records recovered in active segment.
+    pub active_segment_records: u64,
+    /// Number of active-segment truncation events during recovery.
+    pub segment_truncation_events: u64,
+    /// Number of bytes truncated from active segment tails during recovery.
+    pub segment_truncated_bytes: u64,
+    /// Number of bytes truncated from commit-log tail during recovery.
+    pub commit_log_truncated_bytes: u64,
+    /// Elapsed recovery time in nanoseconds for startup recovery.
+    pub recovery_duration_ns: u64,
+}
+
 /// Replay budget limits.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct ReplayBudget {
@@ -194,6 +219,8 @@ pub enum ArchiveRecorderError {
     InvalidConfiguration(&'static str),
     /// Recorder storage root already contains archive files.
     ArchiveAlreadyExists(PathBuf),
+    /// Existing archive is missing a required path.
+    MissingArchiveComponent(PathBuf),
     /// Recorder has been finalized and no more appends are accepted.
     Finalized,
     /// Recorder entered degraded state after a fatal I/O failure.
@@ -214,6 +241,8 @@ pub enum ArchiveRecorderError {
     },
     /// Out-of-space failure.
     OutOfSpace(PathBuf),
+    /// Recovery validation failed due to inconsistent persisted state.
+    RecoveryInconsistent(&'static str),
     /// File header encoding/validation failure.
     FileHeader(ArchiveFileHeaderError),
     /// Underlying I/O failure.
@@ -393,8 +422,40 @@ impl ArchiveRecorderBuilder {
         self
     }
 
-    /// Creates a new recorder.
+    /// Creates a new recorder and fails when archive paths already exist.
     pub fn create(self) -> Result<ArchiveRecorder, ArchiveRecorderError> {
+        self.create_internal(false)
+    }
+
+    /// Opens an existing recorder archive and runs startup recovery, or creates a new archive.
+    pub fn open_or_recover(self) -> Result<ArchiveRecorder, ArchiveRecorderError> {
+        self.create_internal(true)
+    }
+
+    fn create_internal(
+        self,
+        recover_existing: bool,
+    ) -> Result<ArchiveRecorder, ArchiveRecorderError> {
+        let mut config = self.build_config()?;
+        if config.persistence_mode == PersistenceMode::Volatile {
+            return Ok(new_volatile_recorder(config));
+        }
+
+        let archive_exists = config.storage_path.join("catalog.bin").exists()
+            || config.storage_path.join("segments").exists();
+        if archive_exists {
+            if !recover_existing {
+                return Err(ArchiveRecorderError::ArchiveAlreadyExists(
+                    config.storage_path.clone(),
+                ));
+            }
+            return recover_existing_archive(&mut config);
+        }
+
+        create_new_archive(config)
+    }
+
+    fn build_config(&self) -> Result<RecorderConfig, ArchiveRecorderError> {
         let minimal_frame_bytes = ARCHIVE_FILE_HEADER_V1_LEN + FRAME_HEADER_LEN + 8;
         if self.segment_bytes <= minimal_frame_bytes {
             return Err(ArchiveRecorderError::InvalidConfiguration(
@@ -407,7 +468,7 @@ impl ArchiveRecorderBuilder {
             ));
         }
 
-        let config = RecorderConfig {
+        Ok(RecorderConfig {
             storage_path: self.storage_path.clone(),
             metadata_log_path: self
                 .metadata_log_path
@@ -422,104 +483,248 @@ impl ArchiveRecorderBuilder {
             out_of_space_policy: self.out_of_space_policy,
             log_id: self.log_id,
             segment_generation: self.segment_generation,
-        };
+        })
+    }
+}
 
-        if config.persistence_mode == PersistenceMode::Volatile {
-            return Ok(ArchiveRecorder {
-                config,
-                disk: None,
-                stats: ArchiveRecorderStats::default(),
-                next_commit_ordinal: 1,
-                last_sequence: None,
-                index_by_sequence: BTreeMap::new(),
-                volatile_records: Vec::new(),
-                finalized: false,
-                degraded: false,
-            });
+fn new_volatile_recorder(config: RecorderConfig) -> ArchiveRecorder {
+    ArchiveRecorder {
+        config,
+        disk: None,
+        stats: ArchiveRecorderStats::default(),
+        recovery_status: ArchiveRecoveryStatus::default(),
+        next_commit_ordinal: 1,
+        last_sequence: None,
+        index_by_sequence: BTreeMap::new(),
+        volatile_records: Vec::new(),
+        finalized: false,
+        degraded: false,
+    }
+}
+
+fn create_new_archive(config: RecorderConfig) -> Result<ArchiveRecorder, ArchiveRecorderError> {
+    fs::create_dir_all(&config.storage_path).map_err(|source| ArchiveRecorderError::Io {
+        operation: "create storage directory",
+        path: config.storage_path.clone(),
+        source,
+    })?;
+    let segments_path = config.storage_path.join("segments");
+    fs::create_dir_all(&segments_path).map_err(|source| ArchiveRecorderError::Io {
+        operation: "create segments directory",
+        path: segments_path.clone(),
+        source,
+    })?;
+    fs::create_dir_all(&config.metadata_log_path).map_err(|source| ArchiveRecorderError::Io {
+        operation: "create metadata directory",
+        path: config.metadata_log_path.clone(),
+        source,
+    })?;
+
+    let (mut catalog_file, catalog_path) =
+        create_new_file(&config.storage_path.join("catalog.bin"))?;
+    write_archive_header(
+        &mut catalog_file,
+        &catalog_path,
+        ArchiveFileKind::Catalog,
+        config.log_id,
+        0,
+        0,
+    )?;
+
+    let commit_log_path = config.metadata_log_path.join("commit.idxlog");
+    let (mut commit_log_file, commit_log_path) = create_new_file(&commit_log_path)?;
+    write_archive_header(
+        &mut commit_log_file,
+        &commit_log_path,
+        ArchiveFileKind::CommitIdxLog,
+        config.log_id,
+        0,
+        0,
+    )?;
+    let commit_log_write_offset = ARCHIVE_FILE_HEADER_V1_LEN as u64;
+    let commit_log_preallocated_len = preallocate_metadata_log(
+        &mut commit_log_file,
+        &commit_log_path,
+        commit_log_write_offset,
+        config.metadata_log_preallocate_entries,
+    )?;
+
+    let mut recorder = ArchiveRecorder {
+        config,
+        disk: Some(DiskRecorderState {
+            segments_path,
+            catalog_path,
+            commit_log_path,
+            catalog_file,
+            commit_log_file,
+            commit_log_write_offset,
+            commit_log_preallocated_len,
+            active_segment: None,
+        }),
+        stats: ArchiveRecorderStats::default(),
+        recovery_status: ArchiveRecoveryStatus::default(),
+        next_commit_ordinal: 1,
+        last_sequence: None,
+        index_by_sequence: BTreeMap::new(),
+        volatile_records: Vec::new(),
+        finalized: false,
+        degraded: false,
+    };
+
+    recorder.open_new_active_segment(1)?;
+    Ok(recorder)
+}
+
+fn recover_existing_archive(
+    config: &mut RecorderConfig,
+) -> Result<ArchiveRecorder, ArchiveRecorderError> {
+    let recovery_start = Instant::now();
+    let segments_path = config.storage_path.join("segments");
+    let catalog_path = config.storage_path.join("catalog.bin");
+    let commit_log_path = config.metadata_log_path.join("commit.idxlog");
+
+    if !catalog_path.exists() {
+        return Err(ArchiveRecorderError::MissingArchiveComponent(catalog_path));
+    }
+    if !segments_path.exists() {
+        return Err(ArchiveRecorderError::MissingArchiveComponent(segments_path));
+    }
+    if !commit_log_path.exists() {
+        return Err(ArchiveRecorderError::MissingArchiveComponent(
+            commit_log_path,
+        ));
+    }
+
+    let catalog_summaries = read_catalog_entries(&catalog_path)?;
+    let data_segments = list_data_segments(&segments_path)?;
+
+    let mut commit_log_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&commit_log_path)
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "open commit idxlog for recovery",
+            path: commit_log_path.clone(),
+            source,
+        })?;
+    let commit_recovery =
+        recover_commit_log_entries(&mut commit_log_file, &commit_log_path, &segments_path)?;
+    let commit_log_write_offset = commit_recovery.logical_end_offset;
+    let commit_log_preallocated_len = preallocate_metadata_log(
+        &mut commit_log_file,
+        &commit_log_path,
+        commit_log_write_offset,
+        config.metadata_log_preallocate_entries,
+    )?;
+
+    let mut index_by_sequence = BTreeMap::new();
+    let mut next_commit_ordinal = 1u64;
+    let mut last_sequence = None;
+    for entry in &commit_recovery.entries {
+        if index_by_sequence
+            .insert(entry.sequence, entry.locator)
+            .is_some()
+        {
+            return Err(ArchiveRecorderError::RecoveryInconsistent(
+                "commit.idxlog contains duplicate sequence",
+            ));
         }
-
-        if config.storage_path.exists() {
-            if config.storage_path.join("catalog.bin").exists()
-                || config.storage_path.join("segments").exists()
-            {
-                return Err(ArchiveRecorderError::ArchiveAlreadyExists(
-                    config.storage_path.clone(),
+        if let Some(previous) = last_sequence {
+            if entry.sequence <= previous {
+                return Err(ArchiveRecorderError::RecoveryInconsistent(
+                    "commit.idxlog sequence is not strictly monotonic",
                 ));
             }
         }
-
-        fs::create_dir_all(&config.storage_path).map_err(|source| ArchiveRecorderError::Io {
-            operation: "create storage directory",
-            path: config.storage_path.clone(),
-            source,
-        })?;
-        let segments_path = config.storage_path.join("segments");
-        fs::create_dir_all(&segments_path).map_err(|source| ArchiveRecorderError::Io {
-            operation: "create segments directory",
-            path: segments_path.clone(),
-            source,
-        })?;
-        fs::create_dir_all(&config.metadata_log_path).map_err(|source| {
-            ArchiveRecorderError::Io {
-                operation: "create metadata directory",
-                path: config.metadata_log_path.clone(),
-                source,
-            }
-        })?;
-
-        let (mut catalog_file, catalog_path) =
-            create_new_file(&config.storage_path.join("catalog.bin"))?;
-        write_archive_header(
-            &mut catalog_file,
-            &catalog_path,
-            ArchiveFileKind::Catalog,
-            config.log_id,
-            0,
-            0,
-        )?;
-
-        let commit_log_path = config.metadata_log_path.join("commit.idxlog");
-        let (mut commit_log_file, commit_log_path) = create_new_file(&commit_log_path)?;
-        write_archive_header(
-            &mut commit_log_file,
-            &commit_log_path,
-            ArchiveFileKind::CommitIdxLog,
-            config.log_id,
-            0,
-            0,
-        )?;
-        let commit_log_write_offset = ARCHIVE_FILE_HEADER_V1_LEN as u64;
-        let commit_log_preallocated_len = preallocate_metadata_log(
-            &mut commit_log_file,
-            &commit_log_path,
-            commit_log_write_offset,
-            config.metadata_log_preallocate_entries,
-        )?;
-
-        let mut recorder = ArchiveRecorder {
-            config,
-            disk: Some(DiskRecorderState {
-                segments_path,
-                catalog_path,
-                commit_log_path,
-                catalog_file,
-                commit_log_file,
-                commit_log_write_offset,
-                commit_log_preallocated_len,
-                active_segment: None,
-            }),
-            stats: ArchiveRecorderStats::default(),
-            next_commit_ordinal: 1,
-            last_sequence: None,
-            index_by_sequence: BTreeMap::new(),
-            volatile_records: Vec::new(),
-            finalized: false,
-            degraded: false,
-        };
-
-        recorder.open_new_active_segment(1)?;
-        Ok(recorder)
+        last_sequence = Some(entry.sequence);
+        next_commit_ordinal = entry.commit_ordinal.saturating_add(1);
     }
+
+    let (active_segment_id, active_segment_generation) = determine_active_segment_for_recovery(
+        &data_segments,
+        &catalog_summaries,
+        &commit_recovery.entries,
+        config.segment_generation,
+        &segments_path,
+    );
+    config.segment_generation = active_segment_generation;
+
+    let mut active_committed_records = 0u64;
+    let mut active_sequence_start = None;
+    let mut active_sequence_end = None;
+    let mut committed_active_write_offset = ARCHIVE_FILE_HEADER_V1_LEN as u64;
+    for entry in &commit_recovery.entries {
+        if entry.locator.segment_id == active_segment_id
+            && entry.locator.segment_generation == active_segment_generation
+        {
+            active_committed_records += 1;
+            active_sequence_start.get_or_insert(entry.sequence);
+            active_sequence_end = Some(entry.sequence);
+            let end_offset = entry.locator.file_offset + entry.locator.frame_len as u64;
+            if end_offset > committed_active_write_offset {
+                committed_active_write_offset = end_offset;
+            }
+        }
+    }
+
+    let catalog_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&catalog_path)
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "open catalog for recovery",
+            path: catalog_path.clone(),
+            source,
+        })?;
+
+    let mut recorder = ArchiveRecorder {
+        config: config.clone(),
+        disk: Some(DiskRecorderState {
+            segments_path,
+            catalog_path,
+            commit_log_path,
+            catalog_file,
+            commit_log_file,
+            commit_log_write_offset,
+            commit_log_preallocated_len,
+            active_segment: None,
+        }),
+        stats: ArchiveRecorderStats::default(),
+        recovery_status: ArchiveRecoveryStatus::default(),
+        next_commit_ordinal,
+        last_sequence,
+        index_by_sequence,
+        volatile_records: Vec::new(),
+        finalized: false,
+        degraded: false,
+    };
+
+    recorder.open_new_active_segment(active_segment_id)?;
+    let segment_recovery = recorder.recover_active_segment_tail(
+        committed_active_write_offset,
+        active_committed_records,
+        active_sequence_start,
+        active_sequence_end,
+    )?;
+
+    recorder.recovery_status = ArchiveRecoveryStatus {
+        recovered_existing_archive: true,
+        catalog_segments_loaded: catalog_summaries.len() as u64,
+        commit_entries_loaded: commit_recovery.entries.len() as u64,
+        active_segment_id,
+        active_segment_generation,
+        active_segment_records: active_committed_records,
+        segment_truncation_events: if segment_recovery.truncated_bytes > 0 {
+            1
+        } else {
+            0
+        },
+        segment_truncated_bytes: segment_recovery.truncated_bytes,
+        commit_log_truncated_bytes: commit_recovery.truncated_bytes,
+        recovery_duration_ns: recovery_start.elapsed().as_nanos() as u64,
+    };
+
+    Ok(recorder)
 }
 
 #[derive(Debug, Clone)]
@@ -579,6 +784,7 @@ pub struct ArchiveRecorder {
     config: RecorderConfig,
     disk: Option<DiskRecorderState>,
     stats: ArchiveRecorderStats,
+    recovery_status: ArchiveRecoveryStatus,
     next_commit_ordinal: u64,
     last_sequence: Option<u64>,
     index_by_sequence: BTreeMap<u64, ArchiveLocator>,
@@ -591,6 +797,11 @@ impl ArchiveRecorder {
     /// Returns current recorder stats.
     pub fn stats(&self) -> ArchiveRecorderStats {
         self.stats
+    }
+
+    /// Returns startup recovery status.
+    pub fn recovery_status(&self) -> ArchiveRecoveryStatus {
+        self.recovery_status
     }
 
     /// Returns true when recorder entered degraded state.
@@ -953,6 +1164,73 @@ impl ArchiveRecorder {
             })?;
         disk.commit_log_preallocated_len = disk.commit_log_write_offset;
         Ok(())
+    }
+
+    fn recover_active_segment_tail(
+        &mut self,
+        committed_write_offset: u64,
+        committed_records: u64,
+        committed_sequence_start: Option<u64>,
+        committed_sequence_end: Option<u64>,
+    ) -> Result<SegmentRecoveryResult, ArchiveRecorderError> {
+        let disk = self.disk.as_mut().expect("disk state must exist");
+        let active = disk
+            .active_segment
+            .as_mut()
+            .expect("active segment must exist");
+        let segment_path = segment_data_path(
+            &disk.segments_path,
+            active.segment_id,
+            active.segment_generation,
+        );
+
+        let scan_result = scan_active_segment_tail(
+            &mut active.file,
+            &segment_path,
+            self.config.segment_bytes as u64,
+        )?;
+
+        if committed_write_offset < ARCHIVE_FILE_HEADER_V1_LEN as u64 {
+            return Err(ArchiveRecorderError::RecoveryInconsistent(
+                "committed write offset is below frame area",
+            ));
+        }
+        if committed_write_offset > scan_result.valid_end {
+            return Err(ArchiveRecorderError::RecoveryInconsistent(
+                "commit.idxlog points beyond active segment valid boundary",
+            ));
+        }
+
+        let target_write_offset = committed_write_offset.min(scan_result.valid_end);
+        let mut truncated_bytes = 0u64;
+        if scan_result.original_len > target_write_offset {
+            active.file.set_len(target_write_offset).map_err(|source| {
+                ArchiveRecorderError::Io {
+                    operation: "truncate active segment recovery tail",
+                    path: segment_path.clone(),
+                    source,
+                }
+            })?;
+            truncated_bytes = scan_result.original_len - target_write_offset;
+        }
+
+        if self.config.segment_preallocate {
+            active
+                .file
+                .set_len(self.config.segment_bytes as u64)
+                .map_err(|source| ArchiveRecorderError::Io {
+                    operation: "re-preallocate active segment after recovery",
+                    path: segment_path.clone(),
+                    source,
+                })?;
+        }
+
+        active.write_offset = target_write_offset;
+        active.records = committed_records;
+        active.sequence_start = committed_sequence_start;
+        active.sequence_end = committed_sequence_end;
+
+        Ok(SegmentRecoveryResult { truncated_bytes })
     }
 
     fn sync_data_files(&mut self) -> Result<(), ArchiveRecorderError> {
@@ -1532,6 +1810,24 @@ struct CommitEntry {
     frame_checksum: u32,
 }
 
+#[derive(Debug, Clone)]
+struct CommitLogRecoveryResult {
+    entries: Vec<CommitEntry>,
+    logical_end_offset: u64,
+    truncated_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SegmentRecoveryResult {
+    truncated_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SegmentTailScanResult {
+    original_len: u64,
+    valid_end: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SegmentSummary {
     segment_id: u64,
@@ -1558,6 +1854,20 @@ impl SegmentSummary {
         bytes[52..60].copy_from_slice(&self.data_bytes_used.to_le_bytes());
         bytes[60..64].copy_from_slice(&self.segment_checksum.to_le_bytes());
         bytes
+    }
+
+    fn from_bytes(bytes: &[u8; SEGMENT_SUMMARY_LEN]) -> Self {
+        Self {
+            segment_id: read_u64(bytes, 0),
+            segment_generation: read_u32(bytes, 8),
+            sequence_start: read_u64(bytes, 12),
+            sequence_end: read_u64(bytes, 20),
+            records: read_u64(bytes, 28),
+            created_at_ns: read_u64(bytes, 36),
+            sealed_at_ns: read_u64(bytes, 44),
+            data_bytes_used: read_u64(bytes, 52),
+            segment_checksum: read_u32(bytes, 60),
+        }
     }
 }
 
@@ -1678,6 +1988,421 @@ fn preallocate_metadata_log(
             source,
         })?;
     Ok(target_len)
+}
+
+fn read_catalog_entries(path: &Path) -> Result<Vec<SegmentSummary>, ArchiveRecorderError> {
+    let mut file = File::open(path).map_err(|source| ArchiveRecorderError::Io {
+        operation: "open catalog",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut header_bytes = [0u8; ARCHIVE_FILE_HEADER_V1_LEN];
+    file.read_exact(&mut header_bytes)
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "read catalog header",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let header = ArchiveFileHeaderV1::from_bytes(&header_bytes)?;
+    if header.file_kind != ArchiveFileKind::Catalog {
+        return Err(ArchiveRecorderError::RecoveryInconsistent(
+            "catalog.bin has invalid file kind",
+        ));
+    }
+
+    let file_len = file
+        .metadata()
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "read catalog metadata",
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len() as usize;
+    let remaining = file_len.saturating_sub(ARCHIVE_FILE_HEADER_V1_LEN);
+    if remaining % SEGMENT_SUMMARY_LEN != 0 {
+        return Err(ArchiveRecorderError::RecoveryInconsistent(
+            "catalog summary area is not aligned to segment summary length",
+        ));
+    }
+
+    let mut summaries = Vec::with_capacity(remaining / SEGMENT_SUMMARY_LEN);
+    for _ in 0..(remaining / SEGMENT_SUMMARY_LEN) {
+        let mut summary_bytes = [0u8; SEGMENT_SUMMARY_LEN];
+        file.read_exact(&mut summary_bytes)
+            .map_err(|source| ArchiveRecorderError::Io {
+                operation: "read catalog segment summary",
+                path: path.to_path_buf(),
+                source,
+            })?;
+        summaries.push(SegmentSummary::from_bytes(&summary_bytes));
+    }
+
+    Ok(summaries)
+}
+
+fn list_data_segments(segments_path: &Path) -> Result<Vec<(u64, u32)>, ArchiveRecorderError> {
+    let mut segments = Vec::new();
+    let entries = fs::read_dir(segments_path).map_err(|source| ArchiveRecorderError::Io {
+        operation: "read segments directory",
+        path: segments_path.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| ArchiveRecorderError::Io {
+            operation: "read directory entry",
+            path: segments_path.to_path_buf(),
+            source,
+        })?;
+        let Some(file_name) = entry.file_name().to_str().map(|value| value.to_owned()) else {
+            continue;
+        };
+        if let Some((segment_id, generation)) = parse_segment_data_filename(&file_name) {
+            segments.push((segment_id, generation));
+        }
+    }
+    segments.sort_unstable();
+    Ok(segments)
+}
+
+fn parse_segment_data_filename(file_name: &str) -> Option<(u64, u32)> {
+    let value = file_name.strip_prefix("segment-")?.strip_suffix(".data")?;
+    let (segment_id, generation) = value.split_once("-g")?;
+    Some((segment_id.parse().ok()?, generation.parse().ok()?))
+}
+
+fn determine_active_segment_for_recovery(
+    data_segments: &[(u64, u32)],
+    catalog_summaries: &[SegmentSummary],
+    commit_entries: &[CommitEntry],
+    default_generation: u32,
+    segments_path: &Path,
+) -> (u64, u32) {
+    if let Some(last_entry) = commit_entries.last() {
+        let last_segment_id = last_entry.locator.segment_id;
+        let generation = last_entry.locator.segment_generation;
+        let segment_is_sealed =
+            segment_meta_path(segments_path, last_segment_id, generation).exists();
+        return if segment_is_sealed {
+            (last_segment_id + 1, generation)
+        } else {
+            (last_segment_id, generation)
+        };
+    }
+
+    for (segment_id, generation) in data_segments {
+        let meta_path = segment_meta_path(segments_path, *segment_id, *generation);
+        if !meta_path.exists() {
+            return (*segment_id, *generation);
+        }
+    }
+
+    let next_segment_id = catalog_summaries
+        .iter()
+        .map(|summary| summary.segment_id)
+        .max()
+        .or_else(|| {
+            data_segments
+                .iter()
+                .map(|(segment_id, _)| *segment_id)
+                .max()
+        })
+        .unwrap_or(0)
+        + 1;
+    let generation = data_segments
+        .iter()
+        .map(|(_, generation)| *generation)
+        .max()
+        .unwrap_or(default_generation);
+    (next_segment_id, generation)
+}
+
+fn recover_commit_log_entries(
+    file: &mut File,
+    commit_log_path: &Path,
+    segments_path: &Path,
+) -> Result<CommitLogRecoveryResult, ArchiveRecorderError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "seek commit idxlog for recovery",
+            path: commit_log_path.to_path_buf(),
+            source,
+        })?;
+    let mut header_bytes = [0u8; ARCHIVE_FILE_HEADER_V1_LEN];
+    file.read_exact(&mut header_bytes)
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "read commit idxlog recovery header",
+            path: commit_log_path.to_path_buf(),
+            source,
+        })?;
+    let header = ArchiveFileHeaderV1::from_bytes(&header_bytes)?;
+    if header.file_kind != ArchiveFileKind::CommitIdxLog {
+        return Err(ArchiveRecorderError::RecoveryInconsistent(
+            "commit.idxlog has invalid file kind",
+        ));
+    }
+
+    let file_len = file
+        .metadata()
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "read commit idxlog metadata for recovery",
+            path: commit_log_path.to_path_buf(),
+            source,
+        })?
+        .len();
+    let mut logical_end_offset = ARCHIVE_FILE_HEADER_V1_LEN as u64;
+    let mut entries = Vec::new();
+
+    while logical_end_offset + COMMIT_ENTRY_LEN as u64 <= file_len {
+        file.seek(SeekFrom::Start(logical_end_offset))
+            .map_err(|source| ArchiveRecorderError::Io {
+                operation: "seek commit idxlog entry for recovery",
+                path: commit_log_path.to_path_buf(),
+                source,
+            })?;
+        let mut bytes = [0u8; COMMIT_ENTRY_LEN];
+        file.read_exact(&mut bytes)
+            .map_err(|source| ArchiveRecorderError::Io {
+                operation: "read commit idxlog entry for recovery",
+                path: commit_log_path.to_path_buf(),
+                source,
+            })?;
+
+        if bytes.iter().all(|byte| *byte == 0) {
+            break;
+        }
+
+        let magic = [
+            bytes[COMMIT_OFFSET_MAGIC],
+            bytes[COMMIT_OFFSET_MAGIC + 1],
+            bytes[COMMIT_OFFSET_MAGIC + 2],
+            bytes[COMMIT_OFFSET_MAGIC + 3],
+        ];
+        if magic != COMMIT_ENTRY_MAGIC {
+            break;
+        }
+        if read_u16(&bytes, COMMIT_OFFSET_ENTRY_LEN) as usize != COMMIT_ENTRY_LEN {
+            break;
+        }
+
+        let entry = CommitEntry {
+            commit_ordinal: read_u64(&bytes, COMMIT_OFFSET_COMMIT_ORDINAL),
+            sequence: read_u64(&bytes, COMMIT_OFFSET_SEQUENCE),
+            locator: ArchiveLocator {
+                segment_id: read_u64(&bytes, COMMIT_OFFSET_SEGMENT_ID),
+                segment_generation: read_u32(&bytes, COMMIT_OFFSET_SEGMENT_GENERATION),
+                file_offset: read_u64(&bytes, COMMIT_OFFSET_FILE_OFFSET),
+                frame_len: read_u32(&bytes, COMMIT_OFFSET_FRAME_LEN),
+            },
+            frame_checksum: read_u32(&bytes, COMMIT_OFFSET_FRAME_CHECKSUM),
+        };
+        if !locator_points_to_valid_frame(segments_path, entry.locator)? {
+            break;
+        }
+
+        entries.push(entry);
+        logical_end_offset += COMMIT_ENTRY_LEN as u64;
+    }
+
+    let truncated_bytes = file_len.saturating_sub(logical_end_offset);
+    if truncated_bytes > 0 {
+        file.set_len(logical_end_offset)
+            .map_err(|source| ArchiveRecorderError::Io {
+                operation: "truncate commit idxlog recovery tail",
+                path: commit_log_path.to_path_buf(),
+                source,
+            })?;
+    }
+
+    Ok(CommitLogRecoveryResult {
+        entries,
+        logical_end_offset,
+        truncated_bytes,
+    })
+}
+
+fn locator_points_to_valid_frame(
+    segments_path: &Path,
+    locator: ArchiveLocator,
+) -> Result<bool, ArchiveRecorderError> {
+    let segment_path = segment_data_path(
+        segments_path,
+        locator.segment_id,
+        locator.segment_generation,
+    );
+    if !segment_path.exists() {
+        return Ok(false);
+    }
+
+    let mut file = File::open(&segment_path).map_err(|source| ArchiveRecorderError::Io {
+        operation: "open segment for commit-log recovery",
+        path: segment_path.clone(),
+        source,
+    })?;
+    let file_len = file
+        .metadata()
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "read segment metadata for commit-log recovery",
+            path: segment_path.clone(),
+            source,
+        })?
+        .len();
+    if locator.frame_len < FRAME_HEADER_LEN as u32 {
+        return Ok(false);
+    }
+    if locator.file_offset + locator.frame_len as u64 > file_len {
+        return Ok(false);
+    }
+
+    file.seek(SeekFrom::Start(locator.file_offset))
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "seek segment for commit-log recovery",
+            path: segment_path.clone(),
+            source,
+        })?;
+    let mut frame_header = [0u8; FRAME_HEADER_LEN];
+    file.read_exact(&mut frame_header)
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "read frame header for commit-log recovery",
+            path: segment_path.clone(),
+            source,
+        })?;
+
+    let decoded_magic = [
+        frame_header[FRAME_OFFSET_MAGIC],
+        frame_header[FRAME_OFFSET_MAGIC + 1],
+        frame_header[FRAME_OFFSET_MAGIC + 2],
+        frame_header[FRAME_OFFSET_MAGIC + 3],
+    ];
+    if decoded_magic != FRAME_MAGIC {
+        return Ok(false);
+    }
+    let header_len = read_u16(&frame_header, FRAME_OFFSET_HEADER_LEN);
+    if header_len as usize != FRAME_HEADER_LEN {
+        return Ok(false);
+    }
+    let frame_len = read_u32(&frame_header, FRAME_OFFSET_FRAME_LEN);
+    if frame_len != locator.frame_len {
+        return Ok(false);
+    }
+
+    let flags = read_u16(&frame_header, FRAME_OFFSET_FLAGS);
+    if (flags & FRAME_FLAG_CHECKSUM_CRC32C) != 0 {
+        let mut frame_bytes = vec![0u8; frame_len as usize];
+        frame_bytes[..FRAME_HEADER_LEN].copy_from_slice(&frame_header);
+        file.read_exact(&mut frame_bytes[FRAME_HEADER_LEN..])
+            .map_err(|source| ArchiveRecorderError::Io {
+                operation: "read frame bytes for commit-log recovery",
+                path: segment_path.clone(),
+                source,
+            })?;
+        let expected = read_u32(&frame_header, FRAME_OFFSET_CHECKSUM);
+        frame_bytes[FRAME_OFFSET_CHECKSUM..FRAME_OFFSET_CHECKSUM + 4].fill(0);
+        if crc32c::crc32c(&frame_bytes) != expected {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn scan_active_segment_tail(
+    file: &mut File,
+    segment_path: &Path,
+    max_segment_len: u64,
+) -> Result<SegmentTailScanResult, ArchiveRecorderError> {
+    let original_len = file
+        .metadata()
+        .map_err(|source| ArchiveRecorderError::Io {
+            operation: "read active segment metadata for recovery",
+            path: segment_path.to_path_buf(),
+            source,
+        })?
+        .len();
+    let scan_limit = min(original_len, max_segment_len);
+
+    let mut valid_end = ARCHIVE_FILE_HEADER_V1_LEN as u64;
+    while valid_end < scan_limit {
+        let remaining = scan_limit - valid_end;
+        if remaining < FRAME_HEADER_LEN as u64 {
+            file.seek(SeekFrom::Start(valid_end))
+                .map_err(|source| ArchiveRecorderError::Io {
+                    operation: "seek active segment trailing bytes for recovery",
+                    path: segment_path.to_path_buf(),
+                    source,
+                })?;
+            let mut tail = vec![0u8; remaining as usize];
+            file.read_exact(&mut tail)
+                .map_err(|source| ArchiveRecorderError::Io {
+                    operation: "read active segment trailing bytes for recovery",
+                    path: segment_path.to_path_buf(),
+                    source,
+                })?;
+            break;
+        }
+
+        file.seek(SeekFrom::Start(valid_end))
+            .map_err(|source| ArchiveRecorderError::Io {
+                operation: "seek active segment frame for recovery",
+                path: segment_path.to_path_buf(),
+                source,
+            })?;
+        let mut frame_header = [0u8; FRAME_HEADER_LEN];
+        file.read_exact(&mut frame_header)
+            .map_err(|source| ArchiveRecorderError::Io {
+                operation: "read active segment frame header for recovery",
+                path: segment_path.to_path_buf(),
+                source,
+            })?;
+
+        if frame_header.iter().all(|byte| *byte == 0) {
+            break;
+        }
+
+        let decoded_magic = [
+            frame_header[FRAME_OFFSET_MAGIC],
+            frame_header[FRAME_OFFSET_MAGIC + 1],
+            frame_header[FRAME_OFFSET_MAGIC + 2],
+            frame_header[FRAME_OFFSET_MAGIC + 3],
+        ];
+        if decoded_magic != FRAME_MAGIC {
+            break;
+        }
+        if read_u16(&frame_header, FRAME_OFFSET_HEADER_LEN) as usize != FRAME_HEADER_LEN {
+            break;
+        }
+
+        let frame_len = read_u32(&frame_header, FRAME_OFFSET_FRAME_LEN);
+        if frame_len < FRAME_HEADER_LEN as u32 || frame_len as usize % 8 != 0 {
+            break;
+        }
+        if valid_end + frame_len as u64 > scan_limit {
+            break;
+        }
+
+        let flags = read_u16(&frame_header, FRAME_OFFSET_FLAGS);
+        if (flags & FRAME_FLAG_CHECKSUM_CRC32C) != 0 {
+            let mut frame_bytes = vec![0u8; frame_len as usize];
+            frame_bytes[..FRAME_HEADER_LEN].copy_from_slice(&frame_header);
+            file.read_exact(&mut frame_bytes[FRAME_HEADER_LEN..])
+                .map_err(|source| ArchiveRecorderError::Io {
+                    operation: "read active segment frame bytes for recovery",
+                    path: segment_path.to_path_buf(),
+                    source,
+                })?;
+            let expected = read_u32(&frame_header, FRAME_OFFSET_CHECKSUM);
+            frame_bytes[FRAME_OFFSET_CHECKSUM..FRAME_OFFSET_CHECKSUM + 4].fill(0);
+            if crc32c::crc32c(&frame_bytes) != expected {
+                break;
+            }
+        }
+
+        valid_end += frame_len as u64;
+    }
+
+    Ok(SegmentTailScanResult {
+        original_len,
+        valid_end,
+    })
 }
 
 fn read_commit_entries(path: &Path) -> Result<Vec<CommitEntry>, ArchiveReplayError> {
@@ -1876,6 +2601,7 @@ mod tests {
             config: baseline_recorder_config(),
             disk: None,
             stats: ArchiveRecorderStats::default(),
+            recovery_status: ArchiveRecoveryStatus::default(),
             next_commit_ordinal: 1,
             last_sequence: None,
             index_by_sequence: BTreeMap::new(),
