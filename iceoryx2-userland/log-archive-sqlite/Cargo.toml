@@ -1,0 +1,18 @@
+[package]
+name = "iceoryx2-userland-log-archive-sqlite"
+description = "iceoryx2: [internal] SQLite metadata sink for log-archive"
+categories = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+keywords = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+rust-version = { workspace = true }
+version = { workspace = true }
+
+[dependencies]
+iceoryx2-userland-log-archive = { workspace = true, features = ["std"] }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
