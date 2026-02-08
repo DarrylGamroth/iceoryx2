@@ -4,7 +4,7 @@
 - Draft
 - Target branch: `design/log-archive-userland`
 - Last updated: 2026-02-08
-- Implementation progress: Phase 0 complete, Phase 1 complete, Phase 2 complete
+- Implementation progress: Phase 0 complete, Phase 1 complete, Phase 2 complete, Phase 3 complete
 - Depends on: `doc/design-documents/log-messaging-pattern.md`
 - Metadata integration note: `doc/design-documents/log-archive-userland-metadata.md`
 - Traceability matrix: `doc/design-documents/log-archive-v2-traceability.md`
@@ -792,7 +792,7 @@ let by_locator = replayer.read_at_locator(locator)?;
 - Negative locator-path tests verify missing segment and frame-bounds/length mismatch handling with explicit errors.
 - Any replay-vs-ingest performance envelope requirement is explicitly deferred to Phase 6 hardening/performance gates.
 
-### Phase 3 - Recovery and Checkpointing
+### Phase 3 - Recovery and Checkpointing (Completed 2026-02-08)
 - Implement startup recovery:
 - catalog load
 - active segment tail scan+truncate

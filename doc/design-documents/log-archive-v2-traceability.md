@@ -4,7 +4,7 @@
 - Draft
 - Last updated: 2026-02-08
 - Source specification: `doc/design-documents/log-archive-v2.md`
-- Scope of this matrix: Phase 0, Phase 1, and Phase 2 requirements and evidence.
+- Scope of this matrix: Phase 0, Phase 1, Phase 2, and Phase 3 requirements and evidence.
 
 ## Legend
 - `Covered`: requirement is implemented and has automated verification evidence.
@@ -32,9 +32,14 @@
 | `LA2-P2-007` | Replay path `MUST` support bounded budget controls. | Phase 2 replay I/O budget controls | `iceoryx2/src/service/log_archive/runtime.rs` (`ReplayBudget`, `next_batch`, `read_range`) | `log_archive_replayer_honors_replay_budget_limits` | Covered | Limits apply to record count and total bytes. |
 | `LA2-P2-008` | Replayer `MUST` validate locator target availability and frame bounds. | Metadata contract validation requirements | `iceoryx2/src/service/log_archive/runtime.rs` (`MissingSegment`, frame length/header checks) | `log_archive_replayer_reports_missing_segment_for_invalid_locator`, `log_archive_replayer_reports_invalid_frame_length_for_locator_bounds_mismatch` | Covered | Explicit negative locator tests cover availability and bounds mismatches. |
 | `LA2-P2-009` | Sequence replay `MUST` work without `segment.idx`. | Random Access Contract | `iceoryx2/src/service/log_archive/runtime.rs` (uses `commit.idxlog` + segment reads only) | Integration tests pass without index files | Covered | `segment.idx` not required in implemented path. |
+| `LA2-P3-001` | Startup recovery `MUST` load catalog summaries and use them during archive recovery. | Phase 3 recovery plan | `iceoryx2/src/service/log_archive/runtime.rs` (`read_catalog_entries`, `recover_existing_archive`) | `log_archive_open_or_recover_loads_catalog_from_rolled_segments` | Covered | Recovery status reports loaded catalog segment count. |
+| `LA2-P3-002` | Startup recovery `MUST` scan active segment tail and truncate to committed prefix boundary. | Phase 3 recovery plan | `iceoryx2/src/service/log_archive/runtime.rs` (`scan_active_segment_tail`, `recover_active_segment_tail`) | `log_archive_open_or_recover_truncates_active_segment_corrupted_tail` | Covered | Recovery truncates corrupted/uncommitted tail bytes and resumes appends safely. |
+| `LA2-P3-003` | Startup recovery `MUST` replay commit log, truncate invalid tail, and rebuild recorder sequencing state. | Phase 3 recovery plan | `iceoryx2/src/service/log_archive/runtime.rs` (`recover_commit_log_entries`, `recover_existing_archive`) | `log_archive_open_or_recover_truncates_partial_commit_log_tail`, `log_archive_open_or_recover_recovers_unsealed_archive_and_continues` | Covered | Commit-log replay validates locators and restores `next_commit_ordinal` and last sequence. |
+| `LA2-P3-004` | Recorder `MUST` expose deterministic recovery metrics/status for admin surfaces. | Phase 3 recovery plan | `iceoryx2/src/service/log_archive/runtime.rs` (`ArchiveRecoveryStatus`, `recovery_status`) | `log_archive_open_or_recover_recovers_unsealed_archive_and_continues`, `log_archive_open_or_recover_truncates_partial_commit_log_tail` | Covered | Includes catalog count, commit count, truncation bytes, active segment identity, and recovery duration. |
+| `LA2-P3-005` | Recovery path `MUST` work for `Async` and `Sync` persistence modes. | Phase 3 recovery plan | `iceoryx2/src/service/log_archive/runtime.rs` (`open_or_recover`) | `log_archive_open_or_recover_recovers_unsealed_archive_and_continues`, `log_archive_open_or_recover_supports_sync_mode_restart` | Covered | `Volatile` mode has no on-disk recovery path by design. |
 
 ## Gap List
-- No Phase 0-2 gaps remain.
+- No Phase 0-3 gaps remain.
 
 ## Deferred Beyond Phase 2
 - `LA2-ARC-001`: Ack-level APIs (`Accepted`, `DurableData`, `DurableDataAndCommitLog`) with timeout semantics.
