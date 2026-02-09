@@ -11,6 +11,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use clap::Parser;
+use iceoryx2::config::Config;
 use iceoryx2::prelude::*;
 use iceoryx2_bb_posix::barrier::*;
 use iceoryx2_bb_posix::clock::Time;
@@ -20,10 +21,15 @@ const ITERATIONS: u64 = 10000000;
 
 fn perform_response_stream_benchmark<T: Service>(
     args: &Args,
+    config: Option<&Config>,
 ) -> Result<(), Box<dyn core::error::Error>> {
     let service_name_a2b = ServiceName::new("a2b")?;
     let service_name_b2a = ServiceName::new("b2a")?;
-    let node = NodeBuilder::new().create::<T>()?;
+    let node = if let Some(config) = config {
+        NodeBuilder::new().config(config).create::<T>()?
+    } else {
+        NodeBuilder::new().create::<T>()?
+    };
 
     let service_a2b = node
         .service_builder(&service_name_a2b)
@@ -129,10 +135,17 @@ fn perform_response_stream_benchmark<T: Service>(
     Ok(())
 }
 
-fn perform_request_benchmark<T: Service>(args: &Args) -> Result<(), Box<dyn core::error::Error>> {
+fn perform_request_benchmark<T: Service>(
+    args: &Args,
+    config: Option<&Config>,
+) -> Result<(), Box<dyn core::error::Error>> {
     let service_name_a2b = ServiceName::new("a2b")?;
     let service_name_b2a = ServiceName::new("b2a")?;
-    let node = NodeBuilder::new().create::<T>()?;
+    let node = if let Some(config) = config {
+        NodeBuilder::new().config(config).create::<T>()?
+    } else {
+        NodeBuilder::new().create::<T>()?
+    };
 
     let service_a2b = node
         .service_builder(&service_name_a2b)
@@ -249,6 +262,15 @@ struct Args {
     /// The number of additional clients per service in the setup.
     #[clap(long, default_value_t = 0)]
     number_of_additional_clients: usize,
+    /// Run benchmark for IPC setup with hugepage-backed payload/data segments
+    #[clap(long)]
+    bench_ipc_hugepages: bool,
+    /// hugetlbfs mount path for `--bench-ipc-hugepages`
+    #[clap(long, default_value_t = String::from("/dev/hugepages"))]
+    hugepages_mount_path: String,
+    /// Optional explicit hugepage size in bytes for `--bench-ipc-hugepages`
+    #[clap(long)]
+    hugepage_size_bytes: Option<usize>,
 }
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
@@ -260,14 +282,39 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         set_log_level(LogLevel::Error);
     }
 
-    perform_request_benchmark::<ipc::Service>(&args)?;
-    perform_request_benchmark::<ipc_threadsafe::Service>(&args)?;
-    perform_request_benchmark::<local::Service>(&args)?;
-    perform_request_benchmark::<local_threadsafe::Service>(&args)?;
-    perform_response_stream_benchmark::<ipc::Service>(&args)?;
-    perform_response_stream_benchmark::<ipc_threadsafe::Service>(&args)?;
-    perform_response_stream_benchmark::<local::Service>(&args)?;
-    perform_response_stream_benchmark::<local_threadsafe::Service>(&args)?;
+    perform_request_benchmark::<ipc::Service>(&args, None)?;
+    perform_request_benchmark::<ipc_threadsafe::Service>(&args, None)?;
+    perform_request_benchmark::<local::Service>(&args, None)?;
+    perform_request_benchmark::<local_threadsafe::Service>(&args, None)?;
+    perform_response_stream_benchmark::<ipc::Service>(&args, None)?;
+    perform_response_stream_benchmark::<ipc_threadsafe::Service>(&args, None)?;
+    perform_response_stream_benchmark::<local::Service>(&args, None)?;
+    perform_response_stream_benchmark::<local_threadsafe::Service>(&args, None)?;
+
+    if args.bench_ipc_hugepages {
+        let mut hugepages_config = Config::default();
+        hugepages_config.global.service.hugepages.mount_path =
+            Path::new(args.hugepages_mount_path.as_bytes())?;
+        hugepages_config
+            .global
+            .service
+            .hugepages
+            .hugepage_size_bytes = args.hugepage_size_bytes;
+
+        perform_request_benchmark::<ipc_hugepages::Service>(&args, Some(&hugepages_config))?;
+        perform_request_benchmark::<ipc_hugepages_threadsafe::Service>(
+            &args,
+            Some(&hugepages_config),
+        )?;
+        perform_response_stream_benchmark::<ipc_hugepages::Service>(
+            &args,
+            Some(&hugepages_config),
+        )?;
+        perform_response_stream_benchmark::<ipc_hugepages_threadsafe::Service>(
+            &args,
+            Some(&hugepages_config),
+        )?;
+    }
 
     Ok(())
 }

@@ -18,6 +18,22 @@ is subsequently computed.
 cargo run --bin benchmark-publish-subscribe --release -- --bench-all
 ```
 
+To compare regular IPC (typically 4k base pages) against hugepage-backed IPC:
+
+```sh
+# regular IPC baseline
+cargo run --bin benchmark-publish-subscribe --release -- --bench-ipc
+
+# hugepages IPC (default mount: /dev/hugepages)
+cargo run --bin benchmark-publish-subscribe --release -- --bench-ipc-hugepages
+```
+
+Optional hugepages tuning:
+
+```sh
+cargo run --bin benchmark-publish-subscribe --release -- --bench-ipc-hugepages --hugepages-mount-path /dev/hugepages --hugepage-size-bytes 2097152
+```
+
 For more benchmark configuration details, see
 
 ```sh
@@ -41,6 +57,12 @@ latency is subsequently computed.
 
 ```sh
 cargo run --bin benchmark-request-response --release
+```
+
+To include hugepage-backed IPC in addition to the default service variants:
+
+```sh
+cargo run --bin benchmark-request-response --release -- --bench-ipc-hugepages
 ```
 
 For more benchmark configuration details, see
