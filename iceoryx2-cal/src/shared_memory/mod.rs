@@ -56,6 +56,7 @@
 
 pub mod common;
 pub mod file;
+pub mod hugetlbfs;
 pub mod posix;
 pub mod process_local;
 pub mod recommended;

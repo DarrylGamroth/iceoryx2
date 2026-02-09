@@ -19,3 +19,8 @@ pub type Ipc<T> = crate::dynamic_storage::posix_shared_memory::Storage<T>;
 /// [`DynamicStorage`](crate::dynamic_storage::DynamicStorage) concept
 /// implementation for the target.
 pub type Local<T> = crate::dynamic_storage::process_local::Storage<T>;
+
+/// Provides the hugepage-backed file based
+/// [`DynamicStorage`](crate::dynamic_storage::DynamicStorage) concept
+/// implementation for Linux hugepage services.
+pub type IpcHugepages<T> = crate::dynamic_storage::hugetlbfs::Storage<T>;

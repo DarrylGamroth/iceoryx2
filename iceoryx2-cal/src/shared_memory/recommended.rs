@@ -19,3 +19,8 @@ pub type Ipc<Allocator> = crate::shared_memory::posix::Memory<Allocator>;
 /// [`SharedMemory`](crate::shared_memory::SharedMemory) concept
 /// implementation for the target.
 pub type Local<Allocator> = crate::shared_memory::process_local::Memory<Allocator>;
+
+/// Provides the hugepage-backed file based
+/// [`SharedMemory`](crate::shared_memory::SharedMemory) concept
+/// implementation for Linux hugepage services.
+pub type IpcHugepages<Allocator> = crate::shared_memory::hugetlbfs::Memory<Allocator>;

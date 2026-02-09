@@ -25,3 +25,11 @@ pub type Local<Allocator> = crate::resizable_shared_memory::dynamic::DynamicMemo
     Allocator,
     crate::shared_memory::recommended::Local<Allocator>,
 >;
+
+/// Provides the hugepage-backed file based
+/// [`ResizableSharedMemory`](crate::resizable_shared_memory::ResizableSharedMemory) concept
+/// implementation for Linux hugepage services.
+pub type IpcHugepages<Allocator> = crate::resizable_shared_memory::dynamic::DynamicMemory<
+    Allocator,
+    crate::shared_memory::recommended::IpcHugepages<Allocator>,
+>;
