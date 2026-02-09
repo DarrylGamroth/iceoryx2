@@ -13,6 +13,8 @@
 //! A **threadsafe** **lock-free** single producer single consumer queue which can store [`usize`]
 //! integers or indices with overflow behavior. When the queue is full the oldest element is
 //! returned to the producer and replaced with the newest.
+//! `pop()` may retry when racing with a concurrent overflow update, therefore the structure is
+//! lock-free but not strictly wait-free for the consumer under continuous contention.
 //!
 //! # Example
 //!
@@ -58,6 +60,8 @@ use iceoryx2_bb_elementary_traits::{
     relocatable_container::RelocatableContainer,
 };
 use iceoryx2_log::{fail, fatal_panic};
+
+use super::cache_padded::CachePadded;
 
 /// The [`Producer`] of the [`SafelyOverflowingIndexQueue`]/[`FixedSizeSafelyOverflowingIndexQueue`]
 /// which can add values to it via [`Producer::push()`].
@@ -123,8 +127,8 @@ pub mod details {
         pub(super) has_consumer: AtomicBool,
         is_memory_initialized: AtomicBool,
         capacity: usize,
-        write_position: AtomicU64,
-        read_position: AtomicU64,
+        write_position: CachePadded<AtomicU64>,
+        read_position: CachePadded<AtomicU64>,
     }
 
     unsafe impl<PointerType: PointerTrait<UnsafeCell<u64>>> Sync
@@ -147,8 +151,8 @@ pub mod details {
             Self {
                 data_ptr,
                 capacity,
-                write_position: AtomicU64::new(0),
-                read_position: AtomicU64::new(0),
+                write_position: CachePadded::new(AtomicU64::new(0)),
+                read_position: CachePadded::new(AtomicU64::new(0)),
                 has_producer: AtomicBool::new(true),
                 has_consumer: AtomicBool::new(true),
                 is_memory_initialized: AtomicBool::new(true),
@@ -161,8 +165,8 @@ pub mod details {
             Self {
                 data_ptr: RelocatablePointer::new_uninit(),
                 capacity,
-                write_position: AtomicU64::new(0),
-                read_position: AtomicU64::new(0),
+                write_position: CachePadded::new(AtomicU64::new(0)),
+                read_position: CachePadded::new(AtomicU64::new(0)),
                 has_producer: AtomicBool::new(true),
                 has_consumer: AtomicBool::new(true),
                 is_memory_initialized: AtomicBool::new(false),
@@ -184,7 +188,7 @@ pub mod details {
             "Failed to initialize since the allocation of the data memory failed."));
 
             for i in 0..self.capacity + 1 {
-                (self.data_ptr.as_ptr() as *mut UnsafeCell<usize>)
+                (self.data_ptr.as_ptr() as *mut UnsafeCell<u64>)
                     .add(i)
                     .write(UnsafeCell::new(0));
             }
@@ -341,6 +345,7 @@ pub mod details {
 
         /// Acquires an index from the [`SafelyOverflowingIndexQueue`]. If the queue is empty
         /// [`None`] is returned.
+        /// This operation is lock-free but may retry due to the internal compare-exchange loop.
         ///
         /// # Safety
         ///
@@ -420,6 +425,20 @@ pub mod details {
         pub fn is_full(&self) -> bool {
             let (write_position, read_position) = self.acquire_read_and_write_position();
             write_position == read_position + self.capacity as u64
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use super::*;
+
+        #[test]
+        fn write_and_read_positions_are_cache_line_separated() {
+            let sut = SafelyOverflowingIndexQueue::<OwningPointer<UnsafeCell<u64>>>::new(2);
+            let write_position = core::ptr::addr_of!(sut.write_position) as usize;
+            let read_position = core::ptr::addr_of!(sut.read_position) as usize;
+
+            assert!(write_position.abs_diff(read_position) >= 64);
         }
     }
 }

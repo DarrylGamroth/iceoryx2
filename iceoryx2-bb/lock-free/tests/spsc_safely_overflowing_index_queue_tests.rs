@@ -12,6 +12,8 @@
 
 extern crate iceoryx2_bb_loggers;
 
+use iceoryx2_bb_elementary::bump_allocator::BumpAllocator;
+use iceoryx2_bb_elementary_traits::relocatable_container::RelocatableContainer;
 use iceoryx2_bb_lock_free::spsc::safely_overflowing_index_queue::*;
 use iceoryx2_bb_posix::barrier::*;
 use iceoryx2_bb_testing::assert_that;
@@ -251,5 +253,57 @@ fn spsc_safely_overflowing_index_queue_push_pop_works_concurrently_with_full_que
 
     for element in element_counter {
         assert_that!(element, eq 1);
+    }
+}
+
+#[test]
+fn spsc_safely_overflowing_index_queue_relocatable_memory_init_and_usage_works() {
+    const CAPACITY: usize = 32;
+
+    let mut memory = [0u8; RelocatableSafelyOverflowingIndexQueue::const_memory_size(CAPACITY)];
+    let allocator = BumpAllocator::new(memory.as_mut_ptr());
+    let mut sut = unsafe { RelocatableSafelyOverflowingIndexQueue::new_uninit(CAPACITY) };
+    unsafe {
+        assert_that!(sut.init(&allocator), is_ok);
+    }
+
+    assert_that!(sut.capacity(), eq CAPACITY);
+    assert_that!(sut, len 0);
+
+    let mut producer = sut.acquire_producer().unwrap();
+    let mut consumer = sut.acquire_consumer().unwrap();
+
+    for i in 0..CAPACITY {
+        assert_that!(producer.push(i as u64), is_none);
+    }
+    assert_that!(producer.push(1234), eq Some(0));
+
+    for i in 1..CAPACITY {
+        assert_that!(consumer.pop(), eq Some(i as u64));
+    }
+    assert_that!(consumer.pop(), eq Some(1234));
+    assert_that!(consumer.pop(), is_none);
+}
+
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn spsc_safely_overflowing_index_queue_relocatable_init_zeroes_u64_cells() {
+    const CAPACITY: usize = 7;
+    const ALIGN_U64: usize = core::mem::align_of::<u64>();
+
+    let mut memory = [0xA5u8; RelocatableSafelyOverflowingIndexQueue::const_memory_size(CAPACITY)];
+    let base = memory.as_ptr() as usize;
+    let aligned = (base + ALIGN_U64 - 1) & !(ALIGN_U64 - 1);
+    let data_offset = aligned - base;
+    let initialized_size = core::mem::size_of::<u64>() * (CAPACITY + 1);
+
+    let allocator = BumpAllocator::new(memory.as_mut_ptr());
+    let mut sut = unsafe { RelocatableSafelyOverflowingIndexQueue::new_uninit(CAPACITY) };
+    unsafe {
+        assert_that!(sut.init(&allocator), is_ok);
+    }
+
+    for byte in &memory[data_offset..data_offset + initialized_size] {
+        assert_that!(*byte, eq 0u8);
     }
 }

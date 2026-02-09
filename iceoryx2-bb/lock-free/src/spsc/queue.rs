@@ -50,6 +50,8 @@ use iceoryx2_bb_concurrency::atomic::Ordering;
 use iceoryx2_bb_concurrency::atomic::{AtomicBool, AtomicU64};
 use iceoryx2_bb_concurrency::cell::UnsafeCell;
 
+use super::cache_padded::CachePadded;
+
 /// The [`Producer`] of the [`Queue`] which can add values to it via [`Producer::push()`].
 pub struct Producer<'a, T: Copy, const CAPACITY: usize> {
     queue: &'a Queue<T, CAPACITY>,
@@ -90,8 +92,8 @@ impl<T: Copy, const CAPACITY: usize> Drop for Consumer<'_, T, CAPACITY> {
 #[derive(Debug)]
 pub struct Queue<T: Copy, const CAPACITY: usize> {
     data: [UnsafeCell<MaybeUninit<T>>; CAPACITY],
-    write_position: AtomicU64,
-    read_position: AtomicU64,
+    write_position: CachePadded<AtomicU64>,
+    read_position: CachePadded<AtomicU64>,
     has_producer: AtomicBool,
     has_consumer: AtomicBool,
 }
@@ -103,8 +105,8 @@ impl<T: Copy, const CAPACITY: usize> Queue<T, CAPACITY> {
     pub fn new() -> Self {
         Self {
             data: [const { UnsafeCell::new(MaybeUninit::uninit()) }; CAPACITY],
-            write_position: AtomicU64::new(0),
-            read_position: AtomicU64::new(0),
+            write_position: CachePadded::new(AtomicU64::new(0)),
+            read_position: CachePadded::new(AtomicU64::new(0)),
             has_producer: AtomicBool::new(true),
             has_consumer: AtomicBool::new(true),
         }
@@ -285,5 +287,19 @@ impl<T: Copy, const CAPACITY: usize> Queue<T, CAPACITY> {
 impl<T: Copy, const CAPACITY: usize> Default for Queue<T, CAPACITY> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn write_and_read_positions_are_cache_line_separated() {
+        let sut = Queue::<u64, 2>::new();
+        let write_position = core::ptr::addr_of!(sut.write_position) as usize;
+        let read_position = core::ptr::addr_of!(sut.read_position) as usize;
+
+        assert!(write_position.abs_diff(read_position) >= 64);
     }
 }

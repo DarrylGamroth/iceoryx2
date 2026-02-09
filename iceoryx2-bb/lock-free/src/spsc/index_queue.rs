@@ -46,7 +46,6 @@
 
 use core::{alloc::Layout, fmt::Debug};
 
-use iceoryx2_bb_concurrency::atomic::fence;
 use iceoryx2_bb_concurrency::atomic::AtomicBool;
 use iceoryx2_bb_concurrency::atomic::AtomicU64;
 use iceoryx2_bb_concurrency::atomic::Ordering;
@@ -58,6 +57,8 @@ use iceoryx2_bb_elementary_traits::{
     relocatable_container::RelocatableContainer,
 };
 use iceoryx2_log::{fail, fatal_panic};
+
+use super::cache_padded::CachePadded;
 
 /// The [`Producer`] of the [`IndexQueue`]/[`FixedSizeIndexQueue`] which can add values to it
 /// via [`Producer::push()`].
@@ -111,8 +112,8 @@ pub mod details {
     #[repr(C)]
     #[derive(Debug)]
     pub struct IndexQueue<PointerType: PointerTrait<UnsafeCell<u64>>> {
-        write_position: AtomicU64,
-        read_position: AtomicU64,
+        write_position: CachePadded<AtomicU64>,
+        read_position: CachePadded<AtomicU64>,
         pub(super) has_producer: AtomicBool,
         pub(super) has_consumer: AtomicBool,
         is_memory_initialized: AtomicBool,
@@ -134,8 +135,8 @@ pub mod details {
             Self {
                 data_ptr,
                 capacity,
-                write_position: AtomicU64::new(0),
-                read_position: AtomicU64::new(0),
+                write_position: CachePadded::new(AtomicU64::new(0)),
+                read_position: CachePadded::new(AtomicU64::new(0)),
                 has_producer: AtomicBool::new(true),
                 has_consumer: AtomicBool::new(true),
                 is_memory_initialized: AtomicBool::new(true),
@@ -148,8 +149,8 @@ pub mod details {
             Self {
                 data_ptr: RelocatablePointer::new_uninit(),
                 capacity,
-                write_position: AtomicU64::new(0),
-                read_position: AtomicU64::new(0),
+                write_position: CachePadded::new(AtomicU64::new(0)),
+                read_position: CachePadded::new(AtomicU64::new(0)),
                 has_producer: AtomicBool::new(true),
                 has_consumer: AtomicBool::new(true),
                 is_memory_initialized: AtomicBool::new(false),
@@ -208,7 +209,7 @@ pub mod details {
 
             #[cfg(all(test, loom, feature = "std"))]
             {
-                cell.get_mut().deref() as *mut u64
+                cell.get()
             }
             #[cfg(not(all(test, loom, feature = "std")))]
             {
@@ -291,8 +292,11 @@ pub mod details {
         ///     push.
         pub unsafe fn push(&self, value: u64) -> bool {
             let write_position = self.write_position.load(Ordering::Relaxed);
+            ////////////////
+            // SYNC POINT
+            ////////////////
             let is_full =
-                write_position == self.read_position.load(Ordering::Relaxed) + self.capacity as u64;
+                write_position == self.read_position.load(Ordering::Acquire) + self.capacity as u64;
 
             if is_full {
                 return false;
@@ -325,11 +329,11 @@ pub mod details {
             }
 
             let value = unsafe { *self.at(read_position) };
-            // prevent that `out` and `read_position` statements are reordered according to
-            // the AS-IF rule.
-            fence(Ordering::AcqRel);
+            ////////////////
+            // SYNC POINT
+            ////////////////
             self.read_position
-                .store(read_position + 1, Ordering::Relaxed);
+                .store(read_position + 1, Ordering::Release);
 
             Some(value)
         }
@@ -374,6 +378,20 @@ pub mod details {
         pub fn is_full(&self) -> bool {
             let (write_position, read_position) = self.acquire_read_and_write_position();
             write_position == read_position + self.capacity as u64
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use super::*;
+
+        #[test]
+        fn write_and_read_positions_are_cache_line_separated() {
+            let sut = IndexQueue::<OwningPointer<UnsafeCell<u64>>>::new(2);
+            let write_position = core::ptr::addr_of!(sut.write_position) as usize;
+            let read_position = core::ptr::addr_of!(sut.read_position) as usize;
+
+            assert!(write_position.abs_diff(read_position) >= 64);
         }
     }
 }
@@ -461,5 +479,48 @@ impl<const CAPACITY: usize> FixedSizeIndexQueue<CAPACITY> {
     ///   * Ensure that no concurrent pop occurres. Only one thread at a time is allowed to call pop.
     pub unsafe fn pop(&self) -> Option<u64> {
         self.state.pop()
+    }
+}
+
+#[cfg(all(test, loom, feature = "std"))]
+mod loom_tests {
+    use loom::sync::atomic::{AtomicBool, Ordering};
+    use loom::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn index_queue_does_not_overwrite_unread_slot_when_full() {
+        loom::model(|| {
+            let queue = Arc::new(IndexQueue::new(1));
+            let third_push_result = Arc::new(AtomicBool::new(false));
+
+            let producer_queue = Arc::clone(&queue);
+            let producer_third_push_result = Arc::clone(&third_push_result);
+            let producer = loom::thread::spawn(move || {
+                let mut producer = producer_queue.acquire_producer().unwrap();
+
+                assert!(producer.push(10));
+                while !producer.push(11) {
+                    loom::thread::yield_now();
+                }
+
+                producer_third_push_result.store(producer.push(12), Ordering::Relaxed);
+            });
+
+            let consumer_queue = Arc::clone(&queue);
+            let consumer = loom::thread::spawn(move || {
+                let mut consumer = consumer_queue.acquire_consumer().unwrap();
+
+                while consumer.pop() != Some(10) {
+                    loom::thread::yield_now();
+                }
+            });
+
+            producer.join().unwrap();
+            consumer.join().unwrap();
+
+            assert!(!third_push_result.load(Ordering::Relaxed));
+        });
     }
 }
