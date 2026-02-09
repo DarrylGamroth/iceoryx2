@@ -39,6 +39,18 @@ fn mpmc_unique_index_set_capacity_is_set_correctly() {
     assert_that!(sut, is_err);
 }
 
+#[cfg(not(debug_assertions))]
+#[test]
+fn mpmc_unique_index_set_new_uninit_with_unsupported_capacity_panics_in_release() {
+    const UNSUPPORTED_CAPACITY: usize = (1usize << 24) + 1;
+
+    let result = std::panic::catch_unwind(|| unsafe {
+        let _ = UniqueIndexSet::new_uninit(UNSUPPORTED_CAPACITY);
+    });
+
+    assert_that!(result, is_err);
+}
+
 #[test]
 fn mpmc_unique_index_set_when_created_contains_indices() {
     let sut = FixedSizeUniqueIndexSet::<CAPACITY>::new();

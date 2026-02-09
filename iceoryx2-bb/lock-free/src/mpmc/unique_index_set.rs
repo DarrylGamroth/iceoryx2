@@ -102,6 +102,8 @@ use iceoryx2_bb_elementary_traits::pointer_trait::PointerTrait;
 use iceoryx2_bb_elementary_traits::relocatable_container::RelocatableContainer;
 use iceoryx2_log::{fail, fatal_panic};
 
+use super::cache_padded::CachePadded;
+
 enum_gen! { UniqueIndexCreationError
   entry:
     ProvidedCapacityGreaterThanMaxCapacity,
@@ -240,7 +242,7 @@ impl Drop for UniqueIndex<'_> {
 pub struct UniqueIndexSet {
     data_ptr: RelocatablePointer<UnsafeCell<u32>>,
     capacity: u32,
-    pub(crate) head: AtomicU64,
+    pub(crate) head: CachePadded<AtomicU64>,
     is_memory_initialized: AtomicBool,
 }
 
@@ -248,6 +250,7 @@ unsafe impl Sync for UniqueIndexSet {}
 unsafe impl Send for UniqueIndexSet {}
 
 const LOCK_ACQUIRE: u32 = 0x00ffffff;
+const MAX_CAPACITY: usize = LOCK_ACQUIRE as usize - 1;
 
 struct HeadDetails {
     head: u32,
@@ -273,15 +276,15 @@ impl HeadDetails {
 
 impl RelocatableContainer for UniqueIndexSet {
     unsafe fn new_uninit(capacity: usize) -> Self {
-        debug_assert!(
-            capacity < 2usize.pow(24) - 1,
+        assert!(
+            capacity <= MAX_CAPACITY,
             "The provided capacity exceeds the maximum supported capacity of the UniqueIndexSet"
         );
 
         Self {
             data_ptr: RelocatablePointer::new_uninit(),
             capacity: capacity as u32,
-            head: AtomicU64::new(0),
+            head: CachePadded::new(AtomicU64::new(0)),
             is_memory_initialized: AtomicBool::new(false),
         }
     }
@@ -553,6 +556,12 @@ impl<const CAPACITY: usize> FixedSizeUniqueIndexSet<CAPACITY> {
                 capacity, CAPACITY);
         }
 
+        if MAX_CAPACITY < capacity {
+            fail!(from "FixedSizeUniqueIndexSet::new_with_reduced_capacity", with UniqueIndexCreationError::ProvidedCapacityGreaterThanMaxCapacity,
+                "Provided value of capacity {} exceeds maximum supported capacity of {}.",
+                capacity, MAX_CAPACITY);
+        }
+
         if capacity == 0 {
             fail!(from "FixedSizeUniqueIndexSet::new_with_reduced_capacity", with UniqueIndexCreationError::ProvidedCapacityIsZero,
                 "Provided value of capacity is zero.");
@@ -625,7 +634,9 @@ mod test {
 
     use iceoryx2_bb_testing::assert_that;
 
-    use super::HeadDetails;
+    use super::{HeadDetails, UniqueIndexSet};
+    use crate::mpmc::cache_padded::CACHE_LINE_SIZE;
+    use iceoryx2_bb_elementary_traits::relocatable_container::RelocatableContainer;
 
     #[test]
     fn head_details() {
@@ -689,5 +700,14 @@ mod test {
         assert_that!(sut.head, eq 0);
         assert_that!(sut.aba, eq 0);
         assert_that!(sut.borrowed_indices, eq 2u32.pow(24) - 1);
+    }
+
+    #[test]
+    fn unique_index_set_head_is_cacheline_isolated() {
+        let sut = unsafe { UniqueIndexSet::new_uninit(16) };
+        let head_addr = core::ptr::addr_of!(sut.head) as usize;
+        let init_flag_addr = core::ptr::addr_of!(sut.is_memory_initialized) as usize;
+
+        assert_that!(head_addr.abs_diff(init_flag_addr), ge CACHE_LINE_SIZE);
     }
 }

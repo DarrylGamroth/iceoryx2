@@ -72,6 +72,7 @@ use iceoryx2_bb_elementary_traits::pointer_trait::PointerTrait;
 use iceoryx2_bb_elementary_traits::relocatable_container::RelocatableContainer;
 use iceoryx2_log::{fail, fatal_panic};
 
+use super::cache_padded::CachePadded;
 use crate::mpmc::unique_index_set::*;
 
 extern crate alloc;
@@ -182,7 +183,7 @@ pub struct Container<T: Copy + Debug> {
     active_index_ptr: RelocatablePointer<AtomicU64>,
     data_ptr: RelocatablePointer<UnsafeCell<MaybeUninit<T>>>,
     capacity: usize,
-    change_counter: AtomicU64,
+    change_counter: CachePadded<AtomicU64>,
     is_initialized: AtomicBool,
     container_id: UniqueId,
     // must be the last member, since it is a relocatable container as well and then the offset
@@ -201,10 +202,10 @@ impl<T: Copy + Debug> RelocatableContainer for Container<T> {
             container_id: UniqueId::new(),
             active_index_ptr: RelocatablePointer::new(distance_to_active_index),
             data_ptr: RelocatablePointer::new(align_to::<MaybeUninit<T>>(
-                distance_to_active_index as usize + capacity * core::mem::size_of::<AtomicBool>(),
+                distance_to_active_index as usize + capacity * core::mem::size_of::<AtomicU64>(),
             ) as isize),
             capacity,
-            change_counter: AtomicU64::new(0),
+            change_counter: CachePadded::new(AtomicU64::new(0)),
             index_set: UniqueIndexSet::new_uninit(capacity),
             is_initialized: AtomicBool::new(false),
         }
@@ -569,5 +570,43 @@ impl<T: Copy + Debug, const CAPACITY: usize> FixedSizeContainer<T, CAPACITY> {
     ///
     pub unsafe fn update_state(&self, previous_state: &mut ContainerState<T>) -> bool {
         unsafe { self.container.update_state(previous_state) }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    extern crate iceoryx2_bb_loggers;
+
+    use iceoryx2_bb_testing::assert_that;
+
+    use super::*;
+    use crate::mpmc::cache_padded::CACHE_LINE_SIZE;
+    use iceoryx2_bb_elementary_traits::relocatable_container::RelocatableContainer;
+
+    #[test]
+    fn mpmc_container_new_uninit_computes_data_ptr_after_full_active_index_region() {
+        const CAPACITY: usize = 13;
+        let sut = unsafe { Container::<u128>::new_uninit(CAPACITY) };
+
+        let data_ptr = unsafe { sut.data_ptr.as_ptr() } as usize;
+        let data_ptr_field = core::ptr::addr_of!(sut.data_ptr) as usize;
+
+        let distance_to_active_index =
+            core::mem::size_of::<Container<u128>>() + UniqueIndexSet::const_memory_size(CAPACITY);
+        let expected_data_ptr = data_ptr_field
+            + align_to::<MaybeUninit<u128>>(
+                distance_to_active_index + CAPACITY * core::mem::size_of::<AtomicU64>(),
+            );
+
+        assert_that!(data_ptr, eq expected_data_ptr);
+    }
+
+    #[test]
+    fn container_change_counter_is_cacheline_isolated() {
+        let sut = unsafe { Container::<u64>::new_uninit(16) };
+        let change_counter_addr = core::ptr::addr_of!(sut.change_counter) as usize;
+        let init_flag_addr = core::ptr::addr_of!(sut.is_initialized) as usize;
+
+        assert_that!(change_counter_addr.abs_diff(init_flag_addr), ge CACHE_LINE_SIZE);
     }
 }
