@@ -362,7 +362,10 @@ fn validate_hugepage_size(hugepage_size: usize) -> Option<usize> {
     Some(hugepage_size)
 }
 
-fn resolve_hugepage_size(config: &Path, override_hugepage_size: Option<usize>) -> Result<usize, ()> {
+fn resolve_hugepage_size(
+    config: &Path,
+    override_hugepage_size: Option<usize>,
+) -> Result<usize, ()> {
     let (_mount_path, mount_pagesize) = find_hugetlbfs_mount(config)?;
     if let Some(explicit_hugepage_size) = override_hugepage_size {
         return validate_hugepage_size(explicit_hugepage_size).ok_or(());

@@ -250,6 +250,14 @@ pub mod ipc;
 /// [`Send`] but at the cost of an additional internal mutex.
 pub mod ipc_threadsafe;
 
+/// A configuration when communicating between different processes using IPC mechanisms and
+/// hugepage-backed payload segments.
+pub mod ipc_hugepages;
+
+/// A threadsafe configuration when communicating between different processes using IPC mechanisms
+/// and hugepage-backed payload segments.
+pub mod ipc_hugepages_threadsafe;
+
 pub(crate) mod config_scheme;
 pub(crate) mod naming_scheme;
 
@@ -863,6 +871,37 @@ pub trait Service: Debug + Sized + internal::ServiceInternal<Self> + Clone {
 
     /// Defines the construct used to store the payload data of the blackboard service.
     type BlackboardPayload: SharedMemory<BumpAllocator>;
+
+    /// Creates the data-segment storage configuration used for pub/sub and pipeline payload
+    /// segments.
+    fn data_segment_config(
+        global_config: &config::Config,
+    ) -> <Self::SharedMemory as NamedConceptMgmt>::Configuration {
+        <<Self::SharedMemory as NamedConceptMgmt>::Configuration>::default()
+            .prefix(&global_config.global.prefix)
+            .suffix(&global_config.global.service.data_segment_suffix)
+            .path_hint(global_config.global.root_path())
+    }
+
+    /// Creates the resizable data-segment storage configuration used for dynamic payload segments.
+    fn resizable_data_segment_config(
+        global_config: &config::Config,
+    ) -> <Self::ResizableSharedMemory as NamedConceptMgmt>::Configuration {
+        <<Self::ResizableSharedMemory as NamedConceptMgmt>::Configuration>::default()
+            .prefix(&global_config.global.prefix)
+            .suffix(&global_config.global.service.data_segment_suffix)
+            .path_hint(global_config.global.root_path())
+    }
+
+    /// Creates the payload storage configuration used by the blackboard messaging pattern.
+    fn blackboard_payload_config(
+        global_config: &config::Config,
+    ) -> <Self::BlackboardPayload as NamedConceptMgmt>::Configuration {
+        <<Self::BlackboardPayload as NamedConceptMgmt>::Configuration>::default()
+            .prefix(&global_config.global.prefix)
+            .suffix(&global_config.global.service.blackboard_data_suffix)
+            .path_hint(global_config.global.root_path())
+    }
 
     /// Checks if a service under a given [`config::Config`] does exist
     ///

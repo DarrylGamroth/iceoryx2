@@ -62,19 +62,13 @@ pub(crate) fn event_config<Service: crate::service::Service>(
 pub(crate) fn data_segment_config<Service: crate::service::Service>(
     global_config: &config::Config,
 ) -> <Service::SharedMemory as NamedConceptMgmt>::Configuration {
-    <<Service::SharedMemory as NamedConceptMgmt>::Configuration>::default()
-        .prefix(&global_config.global.prefix)
-        .suffix(&global_config.global.service.data_segment_suffix)
-        .path_hint(global_config.global.root_path())
+    Service::data_segment_config(global_config)
 }
 
 pub(crate) fn resizable_data_segment_config<Service: crate::service::Service>(
     global_config: &config::Config,
 ) -> <Service::ResizableSharedMemory as NamedConceptMgmt>::Configuration {
-    <<Service::ResizableSharedMemory as NamedConceptMgmt>::Configuration>::default()
-        .prefix(&global_config.global.prefix)
-        .suffix(&global_config.global.service.data_segment_suffix)
-        .path_hint(global_config.global.root_path())
+    Service::resizable_data_segment_config(global_config)
 }
 
 pub(crate) fn node_monitoring_config<Service: crate::service::Service>(
@@ -132,8 +126,5 @@ pub(crate) fn blackboard_mgmt_config<
 pub(crate) fn blackboard_data_config<Service: crate::service::Service>(
     global_config: &config::Config,
 ) -> <Service::BlackboardPayload as NamedConceptMgmt>::Configuration {
-    <<Service::BlackboardPayload as NamedConceptMgmt>::Configuration>::default()
-        .prefix(&global_config.global.prefix)
-        .suffix(&global_config.global.service.blackboard_data_suffix)
-        .path_hint(global_config.global.root_path())
+    Service::blackboard_payload_config(global_config)
 }

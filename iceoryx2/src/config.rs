@@ -131,6 +131,27 @@ impl core::error::Error for ConfigCreationError {}
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 #[serde(default)]
+pub struct Hugepages {
+    /// hugetlbfs mount path used for hugepage-backed payload segments.
+    pub mount_path: Path,
+    /// Optional hugepage size override in bytes. If not set, it is auto-detected.
+    pub hugepage_size_bytes: Option<usize>,
+}
+
+impl Default for Hugepages {
+    fn default() -> Self {
+        Self {
+            mount_path: Path::new(b"/dev/hugepages").unwrap(),
+            hugepage_size_bytes: None,
+        }
+    }
+}
+
+/// All configurable settings of a [`Service`](crate::service::Service).
+#[non_exhaustive]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+#[serde(default)]
 pub struct Service {
     /// The directory in which all service files are stored
     pub directory: Path,
@@ -151,6 +172,8 @@ pub struct Service {
     pub blackboard_mgmt_suffix: FileName,
     /// The suffix of the blackboard payload data segment
     pub blackboard_data_suffix: FileName,
+    /// Hugepage-specific settings for service variants that use hugepage payload segments.
+    pub hugepages: Hugepages,
 }
 
 impl Default for Service {
@@ -165,6 +188,7 @@ impl Default for Service {
             event_connection_suffix: FileName::new(b".event").unwrap(),
             blackboard_mgmt_suffix: FileName::new(b".blackboard_mgmt").unwrap(),
             blackboard_data_suffix: FileName::new(b".blackboard_data").unwrap(),
+            hugepages: Hugepages::default(),
         }
     }
 }

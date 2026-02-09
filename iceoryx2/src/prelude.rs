@@ -16,8 +16,8 @@ pub use crate::port::{event_id::EventId, unable_to_deliver_strategy::UnableToDel
 pub use crate::service::messaging_pattern::MessagingPattern;
 pub use crate::service::{
     attribute::AttributeSet, attribute::AttributeSpecifier, attribute::AttributeVerifier, ipc,
-    ipc_threadsafe, local, local_threadsafe, port_factory::PortFactory, service_name::ServiceName,
-    Service, ServiceDetails,
+    ipc_hugepages, ipc_hugepages_threadsafe, ipc_threadsafe, local, local_threadsafe,
+    port_factory::PortFactory, service_name::ServiceName, Service, ServiceDetails,
 };
 pub use crate::signal_handling_mode::SignalHandlingMode;
 pub use crate::waitset::{WaitSet, WaitSetAttachmentId, WaitSetBuilder, WaitSetGuard};

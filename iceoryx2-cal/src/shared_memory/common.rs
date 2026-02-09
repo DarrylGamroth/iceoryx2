@@ -95,6 +95,23 @@ pub mod details {
     }
 
     impl<Allocator: ShmAllocator + Debug, Storage: DynamicStorage<AllocatorDetails<Allocator>>>
+        Configuration<Allocator, Storage>
+    {
+        pub fn dynamic_storage_config(&self) -> &Storage::Configuration {
+            &self.dynamic_storage_config
+        }
+
+        pub fn dynamic_storage_config_mut(&mut self) -> &mut Storage::Configuration {
+            &mut self.dynamic_storage_config
+        }
+
+        pub fn with_dynamic_storage_config(mut self, value: Storage::Configuration) -> Self {
+            self.dynamic_storage_config = value;
+            self
+        }
+    }
+
+    impl<Allocator: ShmAllocator + Debug, Storage: DynamicStorage<AllocatorDetails<Allocator>>>
         NamedConceptConfiguration for Configuration<Allocator, Storage>
     {
         fn prefix(mut self, value: &FileName) -> Self {
