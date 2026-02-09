@@ -41,7 +41,7 @@
 use core::{alloc::Layout, fmt::Debug};
 
 use iceoryx2_bb_concurrency::atomic::Ordering;
-use iceoryx2_bb_concurrency::atomic::{AtomicBool, AtomicU8, AtomicUsize};
+use iceoryx2_bb_concurrency::atomic::{AtomicBool, AtomicUsize};
 use iceoryx2_bb_elementary::{
     bump_allocator::BumpAllocator,
     math::unaligned_mem_size,
@@ -63,19 +63,19 @@ pub mod details {
 
     use super::*;
 
-    pub type BitsetElement = AtomicU8;
+    pub type BitsetElement = AtomicUsize;
     const BITSET_ELEMENT_BITSIZE: usize = core::mem::size_of::<BitsetElement>() * 8;
 
     struct Id {
         index: usize,
-        bit: u8,
+        bit: usize,
     }
 
     impl Id {
         fn new(value: usize) -> Id {
             Self {
                 index: value / BITSET_ELEMENT_BITSIZE,
-                bit: (value % BITSET_ELEMENT_BITSIZE) as u8,
+                bit: value % BITSET_ELEMENT_BITSIZE,
             }
         }
     }
@@ -195,7 +195,7 @@ pub mod details {
         fn set_bit(&self, id: Id) -> bool {
             let data_ref = unsafe { &(*self.data_ptr.as_ptr().add(id.index)) };
             let mut current = data_ref.load(Ordering::Relaxed);
-            let mask = 1 << id.bit;
+            let mask = 1usize << id.bit;
 
             loop {
                 if current & mask != 0 {
@@ -221,7 +221,7 @@ pub mod details {
         fn clear_bit(&self, id: Id) -> bool {
             let data_ref = unsafe { &(*self.data_ptr.as_ptr().add(id.index)) };
             let mut current = data_ref.load(Ordering::Relaxed);
-            let mask = 1 << id.bit;
+            let mask = 1usize << id.bit;
 
             loop {
                 if current & mask == 0 {
@@ -249,10 +249,13 @@ pub mod details {
         /// returns false.
         pub fn set(&self, id: usize) -> bool {
             self.verify_init("set()");
-            debug_assert!(
-                id < self.capacity,
-                "This should never happen. Out of bounds access with index {id}."
-            );
+            if self.capacity <= id {
+                debug_assert!(
+                    id < self.capacity,
+                    "This should never happen. Out of bounds access with index {id}."
+                );
+                return false;
+            }
 
             self.set_bit(Id::new(id))
         }
@@ -282,7 +285,7 @@ pub mod details {
                 let value = unsafe { (*self.data_ptr.as_ptr().add(i)).swap(0, Ordering::Relaxed) };
                 let main_index = i * BITSET_ELEMENT_BITSIZE;
                 for b in 0..BITSET_ELEMENT_BITSIZE {
-                    if value & (1 << b) != 0 {
+                    if value & (1usize << b) != 0 {
                         callback(main_index + b);
                     }
                 }

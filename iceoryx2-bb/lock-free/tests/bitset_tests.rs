@@ -53,6 +53,14 @@ fn bit_set_create_fill_and_reset_works() {
 }
 
 #[test]
+fn bit_set_uses_machine_word_sized_atomic_elements() {
+    assert_that!(
+        core::mem::size_of::<details::BitsetElement>(),
+        eq core::mem::size_of::<usize>()
+    );
+}
+
+#[test]
 fn fixed_size_bit_set_create_fill_and_reset_works() {
     const CAPACITY: usize = 122;
     let sut = FixedSizeBitSet::<CAPACITY>::new();
@@ -104,6 +112,25 @@ fn bit_set_set_single_bit_works() {
 }
 
 #[test]
+fn bit_set_sets_and_resets_indices_around_word_boundaries() {
+    const WORD_BITS: usize = core::mem::size_of::<usize>() * 8;
+    const CAPACITY: usize = WORD_BITS * 2 + 2;
+    let sut = BitSet::new(CAPACITY);
+
+    let boundary_indices = [WORD_BITS - 1, WORD_BITS, WORD_BITS + 1];
+    for idx in boundary_indices {
+        assert_that!(sut.set(idx), eq true);
+        assert_that!(sut.set(idx), eq false);
+    }
+
+    let mut observed = Vec::new();
+    sut.reset_all(|id| observed.push(id));
+    observed.sort_unstable();
+
+    assert_that!(observed.as_slice(), eq boundary_indices.as_slice());
+}
+
+#[test]
 #[should_panic]
 #[cfg(debug_assertions)]
 fn bit_set_set_bit_outside_of_bitset_leads_to_panic() {
@@ -111,6 +138,42 @@ fn bit_set_set_bit_outside_of_bitset_leads_to_panic() {
     let sut = BitSet::new(CAPACITY);
 
     sut.set(CAPACITY);
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn bit_set_outside_logical_capacity_is_rejected_in_release() {
+    const CAPACITY: usize = 10;
+    const OUTSIDE_CAPACITY_BUT_IN_STORAGE: usize = 12;
+
+    let sut = BitSet::new(CAPACITY);
+
+    assert_that!(sut.set(OUTSIDE_CAPACITY_BUT_IN_STORAGE), eq false);
+
+    let mut counter = 0;
+    sut.reset_all(|_| {
+        counter += 1;
+    });
+
+    assert_that!(counter, eq 0);
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn fixed_size_bit_set_outside_logical_capacity_is_rejected_in_release() {
+    const CAPACITY: usize = 10;
+    const OUTSIDE_CAPACITY_BUT_IN_STORAGE: usize = 12;
+
+    let sut = FixedSizeBitSet::<CAPACITY>::new();
+
+    assert_that!(sut.set(OUTSIDE_CAPACITY_BUT_IN_STORAGE), eq false);
+
+    let mut counter = 0;
+    sut.reset_all(|_| {
+        counter += 1;
+    });
+
+    assert_that!(counter, eq 0);
 }
 
 #[test]
