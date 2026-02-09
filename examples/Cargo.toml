@@ -237,6 +237,10 @@ name = "service_types_ipc_publisher"
 path = "rust/service_types/ipc_publisher.rs"
 
 [[example]]
+name = "service_types_ipc_hugepages_pubsub"
+path = "rust/service_types/ipc_hugepages_pubsub.rs"
+
+[[example]]
 name = "service_types_local_pubsub"
 path = "rust/service_types/local_pubsub.rs"
 

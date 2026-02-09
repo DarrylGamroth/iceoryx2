@@ -1298,17 +1298,36 @@ impl NodeBuilder {
         self,
         node_id: UniqueSystemId,
     ) -> Result<Node<Service>, NodeCreationFailure> {
+        let msg = "Unable to create node";
         let config = if let Some(ref config) = self.config {
             config.clone()
         } else {
             Config::global_config().clone()
         };
 
+        match Service::validate_configuration(&config) {
+            Ok(()) => {}
+            Err(service::ServiceConfigurationError::InsufficientPermissions) => {
+                fail!(from self, with NodeCreationFailure::InsufficientPermissions,
+                    "{msg} due to insufficient permissions while validating service configuration for {}.",
+                    core::any::type_name::<Service>());
+            }
+            Err(service::ServiceConfigurationError::InvalidConfiguration) => {
+                fail!(from self, with NodeCreationFailure::InternalError,
+                    "{msg} since the service configuration for {} is invalid.",
+                    core::any::type_name::<Service>());
+            }
+            Err(service::ServiceConfigurationError::InternalError) => {
+                fail!(from self, with NodeCreationFailure::InternalError,
+                    "{msg} since service configuration validation for {} failed due to an internal error.",
+                    core::any::type_name::<Service>());
+            }
+        }
+
         if config.global.node.cleanup_dead_nodes_on_creation {
             Node::<Service>::cleanup_dead_nodes(&config);
         }
 
-        let msg = "Unable to create node";
         let monitor_name = fatal_panic!(from self, when FileName::new(node_id.value().to_string().as_bytes()),
                                 "This should never happen! {msg} since the UniqueSystemId is not a valid file name.");
         let (details_storage, details) =

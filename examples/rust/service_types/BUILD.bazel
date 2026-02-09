@@ -25,6 +25,18 @@ rust_binary(
 )
 
 rust_binary(
+    name = "ipc_hugepages_pubsub",
+    srcs = [
+        "ipc_hugepages_pubsub.rs",
+    ],
+    deps = [
+        "//iceoryx2:iceoryx2",
+        "//iceoryx2-log/log:iceoryx2-log",
+        "//iceoryx2-bb/loggers:iceoryx2-bb-loggers",
+    ],
+)
+
+rust_binary(
     name = "local_pubsub",
     srcs = [
         "local_pubsub.rs",

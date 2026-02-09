@@ -14,8 +14,10 @@ extern crate iceoryx2_bb_loggers;
 
 mod service_hugepages_config_tests {
     use iceoryx2::config::Config;
+    use iceoryx2::node::{NodeBuilder, NodeCreationFailure};
     use iceoryx2::service::Service;
     use iceoryx2::service::{ipc, ipc_hugepages, ipc_hugepages_threadsafe};
+    use iceoryx2::testing::generate_isolated_config;
     use iceoryx2_bb_container::semantic_string::SemanticString;
     use iceoryx2_bb_testing::assert_that;
     use iceoryx2_cal::named_concept::NamedConceptConfiguration;
@@ -78,5 +80,18 @@ mod service_hugepages_config_tests {
             *data_segment_config.get_path_hint(),
             eq * config.global.root_path()
         );
+    }
+
+    #[test]
+    fn node_creation_with_hugepages_service_fails_with_non_hugetlbfs_mount() {
+        let mut config = generate_isolated_config();
+        config.global.service.hugepages.mount_path =
+            iceoryx2_bb_system_types::path::Path::new(b"/tmp").unwrap();
+
+        let result = NodeBuilder::new()
+            .config(&config)
+            .create::<ipc_hugepages::Service>();
+        assert_that!(result, is_err);
+        assert_that!(result.err().unwrap(), eq NodeCreationFailure::InternalError);
     }
 }

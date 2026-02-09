@@ -97,6 +97,12 @@ Adjusting `global` settings ensures a non-interfering setup.
 management data segment
 * `global.service.blackboard-data-suffix` - [string]: The suffix of the blackboard
 payload data segment
+* `global.service.hugepages.mount-path` - [string]: hugetlbfs mount path used by
+  `ipc_hugepages::*` service variants for payload/data segments (default:
+  `/dev/hugepages`).
+* `global.service.hugepages.hugepage-size-bytes` - [Option\<int\>]: Optional
+  explicit hugepage size override in bytes. If unset, iceoryx2 auto-detects
+  the size from mount options (`pagesize=`) or `/proc/meminfo`.
 
 ## Defaults
 

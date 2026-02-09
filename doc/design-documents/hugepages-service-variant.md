@@ -1,8 +1,8 @@
 # Hugepages Service Variant
 
 ## Status
-- Draft
-- Target branch: `main` (design-only)
+- Implemented in branch `iox2-0-hugepages-design-v1-scope`
+- Target branch: `main`
 - Last updated: 2026-02-09
 
 ## Terminology
@@ -61,6 +61,15 @@ let service = node
     .service_builder(&"Image/Stream".try_into()?)
     .publish_subscribe::<[u8]>()
     .open_or_create()?;
+```
+
+Hugepages-specific config keys:
+
+```toml
+[global.service.hugepages]
+mount-path = "/dev/hugepages"
+# optional; if unset, auto-detected from mount options or /proc/meminfo
+hugepage-size-bytes = 2097152
 ```
 
 ## Design

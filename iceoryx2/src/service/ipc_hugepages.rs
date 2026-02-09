@@ -35,6 +35,7 @@
 use crate::service::dynamic_config::DynamicConfig;
 use alloc::vec::Vec;
 use core::fmt::Debug;
+use iceoryx2_cal::dynamic_storage::hugetlbfs::RuntimeConfigurationValidationError;
 use iceoryx2_cal::named_concept::NamedConceptConfiguration;
 use iceoryx2_cal::shm_allocator::bump_allocator::BumpAllocator;
 use iceoryx2_cal::shm_allocator::pool_allocator::PoolAllocator;
@@ -84,6 +85,26 @@ impl Service {
 
         config
     }
+
+    fn validate_hugepage_runtime_configuration(
+        global_config: &crate::config::Config,
+    ) -> Result<(), crate::service::ServiceConfigurationError> {
+        match dynamic_storage::hugetlbfs::validate_runtime_configuration(
+            &global_config.global.service.hugepages.mount_path,
+            global_config.global.service.hugepages.hugepage_size_bytes,
+        ) {
+            Ok(()) => Ok(()),
+            Err(RuntimeConfigurationValidationError::InsufficientPermissions) => {
+                Err(crate::service::ServiceConfigurationError::InsufficientPermissions)
+            }
+            Err(RuntimeConfigurationValidationError::InvalidConfiguration) => {
+                Err(crate::service::ServiceConfigurationError::InvalidConfiguration)
+            }
+            Err(RuntimeConfigurationValidationError::InternalError) => {
+                Err(crate::service::ServiceConfigurationError::InternalError)
+            }
+        }
+    }
 }
 
 impl crate::service::Service for Service {
@@ -102,6 +123,12 @@ impl crate::service::Service for Service {
     type BlackboardMgmt<KeyType: Send + Sync + Debug + 'static> =
         dynamic_storage::recommended::Ipc<KeyType>;
     type BlackboardPayload = shared_memory::recommended::IpcHugepages<BumpAllocator>;
+
+    fn validate_configuration(
+        global_config: &crate::config::Config,
+    ) -> Result<(), crate::service::ServiceConfigurationError> {
+        Self::validate_hugepage_runtime_configuration(global_config)
+    }
 
     fn data_segment_config(
         global_config: &crate::config::Config,

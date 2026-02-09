@@ -31,10 +31,29 @@ set ipc_threadsafe_subscriber $spawn_id
 spawn cargo run --example service_types_local_pubsub
 set local_pubsub $spawn_id
 
+set has_hugepages 0
+if {[file isdirectory "/dev/hugepages"]} {
+    if {[catch {exec sh -c "grep -qE \"^[^ ]+ /dev/hugepages hugetlbfs \" /proc/mounts"}] == 0} {
+        if {[catch {exec sh -c "test -w /dev/hugepages"}] == 0} {
+            set has_hugepages 1
+        }
+    }
+}
+
+if {$has_hugepages} {
+    spawn cargo run --example service_types_ipc_hugepages_pubsub
+    set ipc_hugepages_pubsub $spawn_id
+}
+
 #### Test Assertion
 
 expect_output_from $ipc_publisher "send: 0"
 expect_output_from $ipc_threadsafe_subscriber "*received: 3"
 expect_output_from $local_pubsub "*received: 1"
+if {$has_hugepages} {
+    expect_output_from $ipc_hugepages_pubsub "hugepages roundtrip ok"
+} else {
+    puts "Skipping hugepages service-type example test (no writable /dev/hugepages hugetlbfs mount)"
+}
 
 show_test_passed

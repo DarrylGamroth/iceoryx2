@@ -820,6 +820,25 @@ impl ServiceResource for NoResource {
     fn acquire_ownership(&self) {}
 }
 
+/// Failures that can occur while validating service-variant runtime configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceConfigurationError {
+    /// The process has not enough permissions to validate all required resources.
+    InsufficientPermissions,
+    /// The service-variant specific configuration is invalid.
+    InvalidConfiguration,
+    /// Errors that indicate either an implementation issue or a wrongly configured system.
+    InternalError,
+}
+
+impl core::fmt::Display for ServiceConfigurationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "ServiceConfigurationError::{self:?}")
+    }
+}
+
+impl core::error::Error for ServiceConfigurationError {}
+
 /// Represents a service. Used to create or open new services with the
 /// [`crate::node::Node::service_builder()`].
 /// Contains the building blocks a [`Service`] requires to create the underlying resources and
@@ -871,6 +890,13 @@ pub trait Service: Debug + Sized + internal::ServiceInternal<Self> + Clone {
 
     /// Defines the construct used to store the payload data of the blackboard service.
     type BlackboardPayload: SharedMemory<BumpAllocator>;
+
+    /// Validates service-variant specific global configuration before resources are created.
+    fn validate_configuration(
+        _global_config: &config::Config,
+    ) -> Result<(), ServiceConfigurationError> {
+        Ok(())
+    }
 
     /// Creates the data-segment storage configuration used for pub/sub and pipeline payload
     /// segments.

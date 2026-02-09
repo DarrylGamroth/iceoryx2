@@ -58,6 +58,7 @@ const INIT_PERMISSIONS: Permission = Permission::OWNER_WRITE;
 
 const PROC_MOUNTS: FilePath = unsafe { FilePath::new_unchecked_const(b"/proc/mounts") };
 const PROC_MEMINFO: FilePath = unsafe { FilePath::new_unchecked_const(b"/proc/meminfo") };
+const SMALL_FILE_READ_CHUNK_SIZE: usize = 4096;
 
 #[cfg(not(feature = "dev_permissions"))]
 const FINAL_PERMISSIONS: Permission = Permission::OWNER_ALL;
@@ -204,6 +205,42 @@ fn parse_hugepage_size_to_bytes(raw_value: &str) -> Option<usize> {
     base_value.checked_mul(multiplier)
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum MountDiscoveryError {
+    PathIsNotUtf8,
+    PathNotOnHugetlbfs,
+    UnableToReadProcMounts,
+    InsufficientPermissions,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ResolveHugepageSizeError {
+    MountDiscoveryFailure(MountDiscoveryError),
+    InvalidExplicitHugepageSize {
+        hugepage_size: usize,
+        base_page_size: usize,
+    },
+    InvalidMountHugepageSize {
+        hugepage_size: usize,
+        base_page_size: usize,
+    },
+    InvalidOrMissingMeminfoHugepageSize {
+        base_page_size: usize,
+    },
+    UnableToReadProcMeminfo(FileOpenError),
+}
+
+/// Failures that can occur while validating hugetlbfs runtime configuration.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RuntimeConfigurationValidationError {
+    /// The process has insufficient permissions to inspect hugetlbfs/procfs metadata.
+    InsufficientPermissions,
+    /// The configured mount path or hugepage size values are invalid.
+    InvalidConfiguration,
+    /// Errors that indicate either an implementation issue or a wrongly configured system.
+    InternalError,
+}
+
 fn decode_proc_mount_field(value: &str) -> String {
     let mut result = Vec::<u8>::with_capacity(value.len());
     let bytes = value.as_bytes();
@@ -271,17 +308,29 @@ fn hugepage_size_from_mount_options(options: &str) -> Option<usize> {
 
 fn read_small_file(path: &FilePath) -> Result<String, FileOpenError> {
     let file = FileBuilder::new(path).open_existing(AccessMode::Read)?;
-    let mut content = String::new();
-    match file.read_to_string(&mut content) {
-        Ok(_) => Ok(content),
-        Err(_) => Err(FileOpenError::UnknownError(0)),
+    let mut content = Vec::<u8>::new();
+    let mut buffer = [0u8; SMALL_FILE_READ_CHUNK_SIZE];
+
+    loop {
+        let bytes_read = match file.read(&mut buffer) {
+            Ok(v) => v as usize,
+            Err(_) => return Err(FileOpenError::UnknownError(0)),
+        };
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        content.extend_from_slice(&buffer[..bytes_read]);
     }
+
+    String::from_utf8(content).map_err(|_| FileOpenError::UnknownError(0))
 }
 
 fn find_hugetlbfs_mount_in_mounts(
     path_as_str: &str,
     mounts_content: &str,
-) -> Result<(String, Option<usize>), ()> {
+) -> Result<(String, Option<usize>), MountDiscoveryError> {
     let normalized_path = normalize_mount_path(path_as_str);
     let mut best_mount: Option<(usize, String, Option<usize>)> = None;
     for line in mounts_content.lines() {
@@ -329,28 +378,31 @@ fn find_hugetlbfs_mount_in_mounts(
 
     best_mount
         .map(|(_, mount_path, hugepage_size)| (mount_path, hugepage_size))
-        .ok_or(())
+        .ok_or(MountDiscoveryError::PathNotOnHugetlbfs)
 }
 
-fn find_hugetlbfs_mount(path: &Path) -> Result<(String, Option<usize>), ()> {
+fn find_hugetlbfs_mount(path: &Path) -> Result<(String, Option<usize>), MountDiscoveryError> {
     let path_as_str = match core::str::from_utf8(path.as_bytes()) {
         Ok(v) => v,
-        Err(_) => return Err(()),
+        Err(_) => return Err(MountDiscoveryError::PathIsNotUtf8),
     };
     let mounts_content = match read_small_file(&PROC_MOUNTS) {
         Ok(v) => v,
-        Err(_) => return Err(()),
+        Err(FileOpenError::InsufficientPermissions) => {
+            return Err(MountDiscoveryError::InsufficientPermissions)
+        }
+        Err(_) => return Err(MountDiscoveryError::UnableToReadProcMounts),
     };
 
     find_hugetlbfs_mount_in_mounts(path_as_str, &mounts_content)
 }
 
-fn hugepage_size_from_meminfo() -> Option<usize> {
-    let meminfo = read_small_file(&PROC_MEMINFO).ok()?;
-    meminfo
+fn hugepage_size_from_meminfo() -> Result<Option<usize>, FileOpenError> {
+    let meminfo = read_small_file(&PROC_MEMINFO)?;
+    Ok(meminfo
         .lines()
         .find_map(|line| line.strip_prefix("Hugepagesize:"))
-        .and_then(parse_hugepage_size_to_bytes)
+        .and_then(parse_hugepage_size_to_bytes))
 }
 
 fn validate_hugepage_size(hugepage_size: usize) -> Option<usize> {
@@ -365,17 +417,72 @@ fn validate_hugepage_size(hugepage_size: usize) -> Option<usize> {
 fn resolve_hugepage_size(
     config: &Path,
     override_hugepage_size: Option<usize>,
-) -> Result<usize, ()> {
-    let (_mount_path, mount_pagesize) = find_hugetlbfs_mount(config)?;
+) -> Result<usize, ResolveHugepageSizeError> {
+    let (_mount_path, mount_pagesize) =
+        find_hugetlbfs_mount(config).map_err(ResolveHugepageSizeError::MountDiscoveryFailure)?;
+    let base_page_size = iceoryx2_bb_posix::system_configuration::SystemInfo::PageSize.value();
+
     if let Some(explicit_hugepage_size) = override_hugepage_size {
-        return validate_hugepage_size(explicit_hugepage_size).ok_or(());
+        return validate_hugepage_size(explicit_hugepage_size).ok_or(
+            ResolveHugepageSizeError::InvalidExplicitHugepageSize {
+                hugepage_size: explicit_hugepage_size,
+                base_page_size,
+            },
+        );
     }
 
     if let Some(mount_hugepage_size) = mount_pagesize {
-        return validate_hugepage_size(mount_hugepage_size).ok_or(());
+        return validate_hugepage_size(mount_hugepage_size).ok_or(
+            ResolveHugepageSizeError::InvalidMountHugepageSize {
+                hugepage_size: mount_hugepage_size,
+                base_page_size,
+            },
+        );
     }
 
-    validate_hugepage_size(hugepage_size_from_meminfo().unwrap_or(0)).ok_or(())
+    let meminfo_hugepage_size = hugepage_size_from_meminfo()
+        .map_err(ResolveHugepageSizeError::UnableToReadProcMeminfo)?
+        .unwrap_or(0);
+    validate_hugepage_size(meminfo_hugepage_size)
+        .ok_or(ResolveHugepageSizeError::InvalidOrMissingMeminfoHugepageSize { base_page_size })
+}
+
+impl From<ResolveHugepageSizeError> for RuntimeConfigurationValidationError {
+    fn from(value: ResolveHugepageSizeError) -> Self {
+        match value {
+            ResolveHugepageSizeError::MountDiscoveryFailure(
+                MountDiscoveryError::InsufficientPermissions,
+            )
+            | ResolveHugepageSizeError::UnableToReadProcMeminfo(
+                FileOpenError::InsufficientPermissions,
+            ) => RuntimeConfigurationValidationError::InsufficientPermissions,
+            ResolveHugepageSizeError::MountDiscoveryFailure(MountDiscoveryError::PathIsNotUtf8)
+            | ResolveHugepageSizeError::MountDiscoveryFailure(
+                MountDiscoveryError::PathNotOnHugetlbfs,
+            )
+            | ResolveHugepageSizeError::InvalidExplicitHugepageSize { .. }
+            | ResolveHugepageSizeError::InvalidMountHugepageSize { .. }
+            | ResolveHugepageSizeError::InvalidOrMissingMeminfoHugepageSize { .. } => {
+                RuntimeConfigurationValidationError::InvalidConfiguration
+            }
+            ResolveHugepageSizeError::MountDiscoveryFailure(
+                MountDiscoveryError::UnableToReadProcMounts,
+            )
+            | ResolveHugepageSizeError::UnableToReadProcMeminfo(_) => {
+                RuntimeConfigurationValidationError::InternalError
+            }
+        }
+    }
+}
+
+/// Validates hugetlbfs path and hugepage-size configuration without creating storage files.
+pub fn validate_runtime_configuration(
+    mount_path: &Path,
+    hugepage_size_override: Option<usize>,
+) -> Result<(), RuntimeConfigurationValidationError> {
+    resolve_hugepage_size(mount_path, hugepage_size_override)
+        .map(|_| ())
+        .map_err(RuntimeConfigurationValidationError::from)
 }
 
 fn round_up_to_multiple(value: usize, alignment: usize) -> Option<usize> {
@@ -433,11 +540,17 @@ impl<T: Send + Sync + Debug> NamedConceptBuilder<Storage<T>> for Builder<'_, T> 
 impl<T: Send + Sync + Debug> Builder<'_, T> {
     fn open_impl(&self) -> Result<Storage<T>, DynamicStorageOpenError> {
         let msg = "Failed to open dynamic_storage::hugetlbfs::DynamicStorage";
-        let hugepage_size = fail!(from self,
-            when resolve_hugepage_size(&self.config.path, self.config.hugepage_size_bytes),
-            with DynamicStorageOpenError::InternalError,
-            "{msg} since path \"{}\" is not on a hugetlbfs mount or the hugepage size could not be resolved.",
-            self.config.path);
+        let hugepage_size = match resolve_hugepage_size(
+            &self.config.path,
+            self.config.hugepage_size_bytes,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                fail!(from self, with DynamicStorageOpenError::InternalError,
+                        "{msg} since hugepage runtime configuration for path \"{}\" is invalid ({:?}).",
+                        self.config.path, e);
+            }
+        };
 
         let full_path = self.config.path_for(&self.storage_name);
         let mut wait_for_read_write_access = fail!(from self, when AdaptiveWaitBuilder::new().create(),
@@ -543,11 +656,17 @@ impl<T: Send + Sync + Debug> Builder<'_, T> {
 
     fn create_impl(&mut self) -> Result<Storage<T>, DynamicStorageCreateError> {
         let msg = "Failed to create dynamic_storage::hugetlbfs::DynamicStorage";
-        let hugepage_size = fail!(from self,
-            when resolve_hugepage_size(&self.config.path, self.config.hugepage_size_bytes),
-            with DynamicStorageCreateError::InternalError,
-            "{msg} since path \"{}\" is not on a hugetlbfs mount or the hugepage size could not be resolved.",
-            self.config.path);
+        let hugepage_size = match resolve_hugepage_size(
+            &self.config.path,
+            self.config.hugepage_size_bytes,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                fail!(from self, with DynamicStorageCreateError::InternalError,
+                        "{msg} since hugepage runtime configuration for path \"{}\" is invalid ({:?}).",
+                        self.config.path, e);
+            }
+        };
 
         let full_name = self.config.path_for(&self.storage_name);
         let mut file = match FileBuilder::new(&full_name)
@@ -889,7 +1008,10 @@ impl<T: Send + Sync + Debug> DynamicStorage<T> for Storage<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iceoryx2_bb_container::semantic_string::SemanticString;
+    use iceoryx2_bb_system_types::path::Path;
     use iceoryx2_bb_testing::assert_that;
+    use std::cmp::min;
 
     #[test]
     fn parse_hugepage_size_to_bytes_works() {
@@ -935,5 +1057,22 @@ tmpfs /tmp tmpfs rw 0 0\n";
         let mounts = "tmpfs /tmp tmpfs rw 0 0\n";
         let result = find_hugetlbfs_mount_in_mounts("/tmp/some/path", mounts);
         assert_that!(result, is_err);
+    }
+
+    #[test]
+    fn read_small_file_reads_more_than_procfs_reported_st_size() {
+        let expected = std::fs::read_to_string("/proc/mounts").unwrap();
+        let actual = read_small_file(&PROC_MOUNTS).unwrap();
+
+        let prefix_len = min(128, expected.len());
+        assert!(actual.len() >= prefix_len);
+        assert_eq!(&actual[..prefix_len], &expected[..prefix_len]);
+    }
+
+    #[test]
+    fn validate_runtime_configuration_fails_for_non_hugetlbfs_path() {
+        let path = Path::new(b"/proc").unwrap();
+        let result = validate_runtime_configuration(&path, None);
+        assert_that!(result, eq Err(RuntimeConfigurationValidationError::InvalidConfiguration));
     }
 }

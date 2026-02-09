@@ -37,12 +37,39 @@ service type depending on your needs:
   `Send` + `Sync` using internal mutexes.
 * `local_threadsafe::Service` – Like `local::Service`, but with thread-safe
   ports via mutexes.
+* `ipc_hugepages::Service` – Inter-process communication with hugepage-backed
+  payload segments (`hugetlbfs`).
+* `ipc_hugepages_threadsafe::Service` – Thread-safe variant of
+  `ipc_hugepages::Service`.
 
 Thanks to Rust’s `Send` and `Sync` traits, the compiler ensures that
 non-thread-safe objects are not accidentally shared across threads. By default,
 ports like `Publisher`, `Subscriber`, `Server`, and `Client`, as well as payload
 types like `Sample` and `Request`, are **not thread-safe**. If you need thread
 safety, use one of the `*_threadsafe::Service` types.
+
+## Hugepages Service Types
+
+The hugepages variants use hugetlbfs-backed payload/data segments and keep all
+messaging APIs unchanged.
+
+### Prerequisites
+
+* Reserve hugepages on Linux (for example `vm.nr_hugepages`).
+* Mount hugetlbfs (default path used by iceoryx2: `/dev/hugepages`).
+* Ensure the process user can create/open files in that mount.
+
+### Run It
+
+```sh
+cargo run --example service_types_ipc_hugepages_pubsub
+```
+
+This example creates publisher and subscriber endpoints with
+`ipc_hugepages::Service` in one process and verifies a roundtrip.
+
+Important: `ipc_hugepages::*` and regular `ipc::*` are intentionally separate
+service variants and must not be mixed for the same service instance.
 
 ## Example: Local PubSub
 
@@ -102,6 +129,8 @@ publisher, as it's confined to the process.
 | --------------------------- | ------------- | ----------------- | --------------------------------------------------- |
 | `ipc::Service`              | Inter-process | ❌ Not thread-safe| Default for most examples                           |
 | `ipc_threadsafe::Service`   | Inter-process | ✅ Thread-safe    | Adds mutex overhead for safe sharing across threads |
+| `ipc_hugepages::Service`    | Inter-process | ❌ Not thread-safe| Payload/data segments backed by hugetlbfs hugepages |
+| `ipc_hugepages_threadsafe::Service` | Inter-process | ✅ Thread-safe | Thread-safe hugepages payload/data segments         |
 | `local::Service`            | Intra-process | ❌ Not thread-safe| Confined to the current process                     |
 | `local_threadsafe::Service` | Intra-process | ✅ Thread-safe    | Safe for multi-threaded intra-process communication |
 
