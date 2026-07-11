@@ -835,6 +835,7 @@ impl<UserHeader: Debug + ZeroCopySend, ServiceType: service::Service>
             .message_type_details
             .payload
             .alignment = PROGRESSIVE_CONTROL_ALIGNMENT;
+        self.inner.adjust_payload_alignment();
     }
 
     /// Opens an existing compatible service or creates it if it does not exist.
