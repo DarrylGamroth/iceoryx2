@@ -149,6 +149,42 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
 }
 
 /// Active progressive writer. It can mutate only the unpublished suffix.
+///
+/// The sent typestate intentionally has no whole-payload mutable API, mutable
+/// user-header API, or `DerefMut` implementation:
+///
+/// ```compile_fail
+/// use iceoryx2::prelude::*;
+/// use iceoryx2::progressive_sample_mut::ProgressiveSampleMut;
+///
+/// fn whole_payload_is_unavailable(
+///     writer: &mut ProgressiveSampleMut<ipc::Service, ()>,
+/// ) {
+///     let _ = writer.payload_mut();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use iceoryx2::prelude::*;
+/// use iceoryx2::progressive_sample_mut::ProgressiveSampleMut;
+///
+/// fn mutable_user_header_is_unavailable(
+///     writer: &mut ProgressiveSampleMut<ipc::Service, ()>,
+/// ) {
+///     let _ = writer.user_header_mut();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use iceoryx2::prelude::*;
+/// use iceoryx2::progressive_sample_mut::ProgressiveSampleMut;
+///
+/// fn deref_mut_is_unavailable(
+///     writer: &mut ProgressiveSampleMut<ipc::Service, ()>,
+/// ) {
+///     let _: &mut [u8] = &mut *writer;
+/// }
+/// ```
 #[derive(Debug)]
 pub struct ProgressiveSampleMut<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
 {
@@ -298,5 +334,76 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
                 .return_loaned_sample(self.offset_to_chunk);
             self.owns_loan = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+    use core::mem::MaybeUninit;
+
+    use iceoryx2_bb_concurrency::cell::UnsafeCell;
+
+    use super::*;
+    use crate::service::header::progressive_publish_subscribe::ProgressiveControl;
+
+    const CAPACITY: usize = 64;
+
+    #[repr(C, align(128))]
+    struct AliasingModel {
+        control: ProgressiveControl,
+        payload: UnsafeCell<[MaybeUninit<u8>; CAPACITY]>,
+    }
+
+    // The test models the protocol's monotonic capability split: the sole
+    // writer touches only bytes above the release-published watermark and the
+    // reader constructs only acquire-bounded immutable prefixes.
+    unsafe impl Sync for AliasingModel {}
+
+    #[test]
+    fn progressive_aliasing_model_preserves_prefix_suffix_split() {
+        let storage = Arc::new(AliasingModel {
+            control: ProgressiveControl::new(),
+            payload: UnsafeCell::new([MaybeUninit::uninit(); CAPACITY]),
+        });
+
+        std::thread::scope(|scope| {
+            let writer_storage = storage.clone();
+            scope.spawn(move || {
+                let payload = writer_storage.payload.get().cast::<u8>();
+                for index in 0..CAPACITY {
+                    // Construct only the one-byte unpublished region directly
+                    // from the stored raw pointer, never a complete slice.
+                    unsafe { payload.add(index).write(index as u8) };
+                    writer_storage.control.publish_len((index + 1) as u64);
+                }
+                writer_storage.control.complete();
+            });
+
+            let reader_storage = storage.clone();
+            scope.spawn(move || {
+                let payload = reader_storage.payload.get().cast::<u8>();
+                let mut checked = 0;
+                while checked < CAPACITY {
+                    let published =
+                        reader_storage.control.published_len(Ordering::Acquire) as usize;
+                    let prefix = unsafe { core::slice::from_raw_parts(payload, published) };
+                    for (index, value) in prefix[checked..].iter().enumerate() {
+                        assert_eq!(*value, (checked + index) as u8);
+                    }
+                    checked = published;
+                    core::hint::spin_loop();
+                }
+                while reader_storage.control.state(Ordering::Acquire)
+                    == ProgressiveSampleState::Filling
+                {
+                    core::hint::spin_loop();
+                }
+                assert_eq!(
+                    reader_storage.control.state(Ordering::Acquire),
+                    ProgressiveSampleState::Complete
+                );
+            });
+        });
     }
 }

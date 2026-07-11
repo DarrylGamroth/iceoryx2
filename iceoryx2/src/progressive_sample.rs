@@ -15,6 +15,19 @@ use crate::port::subscriber::SubscriberSharedState;
 use crate::service::header::progressive_publish_subscribe::{Header, ProgressiveSampleState};
 
 /// A subscriber's whole-allocation lease for one progressive sample.
+///
+/// A payload borrow cannot outlive its sample lease:
+///
+/// ```compile_fail
+/// use iceoryx2::prelude::*;
+/// use iceoryx2::progressive_sample::ProgressiveSample;
+///
+/// fn payload_cannot_outlive_sample<'a>(
+///     sample: ProgressiveSample<ipc::Service, ()>,
+/// ) -> &'a [u8] {
+///     sample.payload()
+/// }
+/// ```
 #[derive(Debug)]
 pub struct ProgressiveSample<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend> {
     pub(crate) subscriber_shared_state:
@@ -75,6 +88,36 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
     /// Acquire-loads the current terminal state.
     pub fn state(&self) -> ProgressiveSampleState {
         self.control().state(Ordering::Acquire)
+    }
+
+    /// Returns the terminal state while also accounting for abrupt publisher
+    /// process death.
+    ///
+    /// Unlike [`Self::state`], this is not a hot-path operation: when the
+    /// shared state is still [`ProgressiveSampleState::Filling`], it queries
+    /// the node-monitoring backend and may perform operating-system calls. A
+    /// dead or already-cleaned origin node is reported as `Aborted` without
+    /// mutating the shared header. Inaccessible or undefined node state is
+    /// handled conservatively as `Filling`.
+    pub fn state_with_publisher_liveness(
+        &self,
+    ) -> Result<ProgressiveSampleState, crate::node::NodeListFailure> {
+        use crate::node::NodeState;
+
+        let state = self.state();
+        if state != ProgressiveSampleState::Filling {
+            return Ok(state);
+        }
+
+        let node_id = unsafe { &*self.header }.node_id();
+        let shared_state = self.subscriber_shared_state.lock();
+        let config = shared_state.receiver.service_state.shared_node().config();
+        Ok(match NodeState::<Service>::new(&node_id, config)? {
+            None | Some(NodeState::Dead(_)) => ProgressiveSampleState::Aborted,
+            Some(NodeState::Alive(_))
+            | Some(NodeState::Inaccessible(_))
+            | Some(NodeState::Undefined(_)) => ProgressiveSampleState::Filling,
+        })
     }
 
     /// Returns the immutable application user header.
