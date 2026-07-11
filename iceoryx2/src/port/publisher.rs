@@ -131,6 +131,8 @@ use crate::port::details::sender::*;
 use crate::port::port_name::PortName;
 use crate::port::update_connections::{ConnectionFailure, UpdateConnections};
 use crate::prelude::{BackpressureStrategy, Flatbuffer};
+use crate::progressive_sample_mut::ProgressiveSampleMutUninit;
+use crate::raw_sample::RawSampleMut;
 use crate::sample_mut::SampleMut;
 use crate::sample_mut_uninit::SampleMutUninit;
 use crate::service::dynamic_config::publish_subscribe::{PublisherDetails, SubscriberDetails};
@@ -324,6 +326,26 @@ impl<Service: service::Service> PublisherSharedState<Service> {
             "{} since the connections could not be updated.", msg);
 
         self.add_sample_to_history(offset, sample_size);
+        self.sender
+            .deliver_offset(offset, sample_size, ChannelId::new(0))
+    }
+
+    pub(crate) fn send_progressive_sample(
+        &self,
+        offset: PointerOffset,
+        sample_size: usize,
+    ) -> Result<usize, SendError> {
+        let msg = "Unable to send progressive sample";
+        if !self.is_active.load(Ordering::Relaxed) {
+            fail!(from self, with SendError::ConnectionBrokenSinceSenderNoLongerExists,
+                "{} since the corresponding publisher is already disconnected.", msg);
+        }
+
+        fail!(from self, when self.update_connections(),
+            "{} since the connections could not be updated.", msg);
+
+        // Progressive samples never enter ordinary history. The offset is
+        // delivered once; watermark updates touch only the sample header.
         self.sender
             .deliver_offset(offset, sample_size, ChannelId::new(0))
     }
@@ -804,6 +826,57 @@ impl<Service: service::Service, Payload: Debug + ZeroCopySend, UserHeader: Debug
             .lock()
             .config
             .initial_max_slice_len
+    }
+}
+
+impl<Service: service::Service, UserHeader: Default + Debug + ZeroCopySend>
+    Publisher<Service, [u8], UserHeader>
+{
+    pub(crate) fn loan_progressive_slice_uninit(
+        &self,
+        capacity: usize,
+    ) -> Result<ProgressiveSampleMutUninit<Service, UserHeader>, LoanError> {
+        use crate::service::header::progressive_publish_subscribe::Header as ProgressiveHeader;
+        use crate::service::static_config::publish_subscribe::SampleDeliveryMode;
+
+        let shared_state = self.publisher_shared_state.lock();
+        debug_assert_eq!(
+            shared_state
+                .sender
+                .service_state
+                .static_config()
+                .publish_subscribe()
+                .sample_delivery_mode(),
+            SampleDeliveryMode::Progressive
+        );
+        let max_slice_len = shared_state.config.initial_max_slice_len;
+        if shared_state.config.allocation_strategy == AllocationStrategy::Static
+            && max_slice_len < capacity
+        {
+            fail!(from self, with LoanError::ExceedsMaxLoanSize,
+                "Unable to loan progressive slice with {} bytes since it exceeds the maximum supported length of {}.",
+                capacity, max_slice_len);
+        }
+
+        let chunk = shared_state
+            .sender
+            .allocate(shared_state.sender.sample_layout(capacity))?;
+        let header = chunk.header.cast::<ProgressiveHeader>();
+        let user_header = chunk.user_header.cast::<UserHeader>();
+        let node_id = shared_state.sender.service_state.shared_node().id();
+        unsafe { header.write(ProgressiveHeader::new(*node_id, self.id(), capacity as u64)) };
+        unsafe { user_header.write(UserHeader::default()) };
+
+        Ok(ProgressiveSampleMutUninit {
+            publisher_shared_state: self.publisher_shared_state.clone(),
+            header,
+            user_header,
+            payload: chunk.payload,
+            capacity,
+            offset_to_chunk: chunk.offset,
+            sample_size: chunk.size,
+            owns_loan: true,
+        })
     }
 }
 

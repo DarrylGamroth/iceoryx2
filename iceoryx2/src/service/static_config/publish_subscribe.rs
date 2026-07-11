@@ -39,6 +39,20 @@ use iceoryx2_bb_derive_macros::ZeroCopySend;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
 use serde::{Deserialize, Serialize};
 
+/// Determines whether samples are delivered only after they are complete or
+/// whether subscribers may observe a monotonically growing immutable prefix.
+#[derive(
+    Debug, Default, Clone, Copy, Eq, Hash, PartialEq, ZeroCopySend, Serialize, Deserialize,
+)]
+#[repr(C)]
+pub enum SampleDeliveryMode {
+    /// Ordinary publish/subscribe delivery.
+    #[default]
+    Complete,
+    /// Experimental single-publisher progressive delivery for byte slices.
+    Progressive,
+}
+
 /// The static configuration of an
 /// [`MessagingPattern::PublishSubscribe`](crate::service::messaging_pattern::MessagingPattern::PublishSubscribe)
 /// based service. Contains all parameters that do not change during the lifetime of a
@@ -53,6 +67,7 @@ pub struct StaticConfig {
     pub(crate) subscriber_max_buffer_size: usize,
     pub(crate) subscriber_max_borrowed_samples: usize,
     pub(crate) enable_safe_overflow: bool,
+    pub(crate) sample_delivery_mode: SampleDeliveryMode,
     pub(crate) message_type_details: MessageTypeDetails,
 }
 
@@ -72,6 +87,7 @@ impl StaticConfig {
                 .publish_subscribe
                 .subscriber_max_borrowed_samples,
             enable_safe_overflow: config.defaults.publish_subscribe.enable_safe_overflow,
+            sample_delivery_mode: SampleDeliveryMode::Complete,
             message_type_details: MessageTypeDetails::default(),
         }
     }
@@ -124,6 +140,11 @@ impl StaticConfig {
     /// is full.
     pub fn has_safe_overflow(&self) -> bool {
         self.enable_safe_overflow
+    }
+
+    /// Returns the sample delivery mode of the service.
+    pub fn sample_delivery_mode(&self) -> SampleDeliveryMode {
+        self.sample_delivery_mode
     }
 
     /// Returns the type details of the [`crate::service::Service`].

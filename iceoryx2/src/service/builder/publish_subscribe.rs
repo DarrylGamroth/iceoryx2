@@ -27,6 +27,9 @@ use iceoryx2_log::{fail, fatal_panic, warn};
 use super::ServiceState;
 use crate::service::builder::{DynamicConfigCreationArgs, ServiceCreateError, ServiceOpenError};
 use crate::service::dynamic_config::publish_subscribe::DynamicConfigSettings;
+use crate::service::header::progressive_publish_subscribe::{
+    Header as ProgressiveHeader, PROGRESSIVE_CONTROL_ALIGNMENT,
+};
 use crate::service::header::publish_subscribe::Header;
 use crate::service::marker::{CustomHeaderMarker, CustomPayloadMarker, Flatbuffer};
 use crate::service::port_factory::publish_subscribe;
@@ -367,6 +370,7 @@ struct Verify {
     publisher_history_size: bool,
     enable_safe_overflow: bool,
     max_nodes: bool,
+    sample_delivery_mode: bool,
 }
 
 /// Builder to create new [`MessagingPattern::PublishSubscribe`] based [`Service`]s
@@ -691,6 +695,23 @@ impl<
                                 msg, existing_settings.max_nodes, required_settings.max_nodes);
         }
 
+        if self.verify.sample_delivery_mode
+            && existing_settings.sample_delivery_mode != required_settings.sample_delivery_mode
+        {
+            fail!(from self, with PublishSubscribeOpenError::IncompatibleMessagingPattern,
+                "{} since the service uses an incompatible sample delivery mode.", msg);
+        }
+
+        if required_settings.sample_delivery_mode
+            == static_config::publish_subscribe::SampleDeliveryMode::Progressive
+            && (existing_settings.max_publishers != 1
+                || existing_settings.history_size != 0
+                || existing_settings.enable_safe_overflow)
+        {
+            fail!(from self, with PublishSubscribeOpenError::IncompatibleMessagingPattern,
+                "{} since the progressive service violates its single-publisher, zero-history, or non-overflowing invariant.", msg);
+        }
+
         Ok(())
     }
 
@@ -818,6 +839,120 @@ impl<
                 .alignment
                 .max(alignment);
         }
+    }
+}
+
+/// Builder for experimental single-publisher progressive byte-slice services.
+#[derive(Debug)]
+pub struct ProgressiveBuilder<UserHeader: Debug + ZeroCopySend, ServiceType: service::Service> {
+    inner: Builder<[u8], UserHeader, ServiceType>,
+}
+
+impl<UserHeader: Debug + ZeroCopySend, ServiceType: service::Service>
+    ProgressiveBuilder<UserHeader, ServiceType>
+{
+    fn prepare_config_details(&mut self) {
+        self.inner.config_details_mut().message_type_details =
+            MessageTypeDetails::from::<ProgressiveHeader, UserHeader, u8>(TypeVariant::Dynamic);
+        self.inner
+            .config_details_mut()
+            .message_type_details
+            .payload
+            .alignment = PROGRESSIVE_CONTROL_ALIGNMENT;
+    }
+
+    /// Opens an existing compatible service or creates it if it does not exist.
+    pub fn open_or_create(
+        self,
+    ) -> Result<
+        publish_subscribe::ProgressivePortFactory<ServiceType, UserHeader>,
+        PublishSubscribeOpenOrCreateError,
+    > {
+        self.open_or_create_with_attributes(&AttributeVerifier::new())
+    }
+
+    /// Opens or creates a progressive service with attribute requirements.
+    pub fn open_or_create_with_attributes(
+        mut self,
+        attributes: &AttributeVerifier,
+    ) -> Result<
+        publish_subscribe::ProgressivePortFactory<ServiceType, UserHeader>,
+        PublishSubscribeOpenOrCreateError,
+    > {
+        self.prepare_config_details();
+        Ok(publish_subscribe::ProgressivePortFactory::new(
+            self.inner.open_or_create_impl(attributes)?,
+        ))
+    }
+
+    /// Opens an existing progressive service.
+    pub fn open(
+        self,
+    ) -> Result<
+        publish_subscribe::ProgressivePortFactory<ServiceType, UserHeader>,
+        PublishSubscribeOpenError,
+    > {
+        self.open_with_attributes(&AttributeVerifier::new())
+    }
+
+    /// Opens an existing progressive service with attribute requirements.
+    pub fn open_with_attributes(
+        mut self,
+        attributes: &AttributeVerifier,
+    ) -> Result<
+        publish_subscribe::ProgressivePortFactory<ServiceType, UserHeader>,
+        PublishSubscribeOpenError,
+    > {
+        self.prepare_config_details();
+        Ok(publish_subscribe::ProgressivePortFactory::new(
+            self.inner.open_impl(attributes)?,
+        ))
+    }
+
+    /// Creates a progressive service.
+    pub fn create(
+        self,
+    ) -> Result<
+        publish_subscribe::ProgressivePortFactory<ServiceType, UserHeader>,
+        PublishSubscribeCreateError,
+    > {
+        self.create_with_attributes(&AttributeSpecifier::new())
+    }
+
+    /// Creates a progressive service with attributes.
+    pub fn create_with_attributes(
+        mut self,
+        attributes: &AttributeSpecifier,
+    ) -> Result<
+        publish_subscribe::ProgressivePortFactory<ServiceType, UserHeader>,
+        PublishSubscribeCreateError,
+    > {
+        self.prepare_config_details();
+        Ok(publish_subscribe::ProgressivePortFactory::new(
+            self.inner.create_impl(attributes)?,
+        ))
+    }
+}
+
+impl<UserHeader: Debug + ZeroCopySend, ServiceType: service::Service>
+    Builder<[u8], UserHeader, ServiceType>
+{
+    /// Selects experimental single-publisher progressive delivery.
+    ///
+    /// Progressive services always use one publisher, no history, no safe
+    /// overflow, and a 128-byte-aligned byte-slice payload.
+    pub fn progressive(mut self) -> ProgressiveBuilder<UserHeader, ServiceType> {
+        let config = self.config_details_mut();
+        config.sample_delivery_mode =
+            static_config::publish_subscribe::SampleDeliveryMode::Progressive;
+        config.max_publishers = 1;
+        config.history_size = 0;
+        config.enable_safe_overflow = false;
+        self.verify.number_of_publishers = true;
+        self.verify.publisher_history_size = true;
+        self.verify.enable_safe_overflow = true;
+        self.verify.sample_delivery_mode = true;
+        ProgressiveBuilder { inner: self }
     }
 }
 
