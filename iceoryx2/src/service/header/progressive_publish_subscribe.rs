@@ -58,7 +58,6 @@ impl ProgressiveControl {
     #[inline]
     pub(crate) fn publish_len(&self, value: u64) {
         self.published_len.store(value, Ordering::Release);
-        self.change_counter.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]

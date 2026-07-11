@@ -48,6 +48,7 @@ use super::nodes;
 use super::{publisher::PortFactoryPublisher, subscriber::PortFactorySubscriber};
 use crate::identifiers::UniqueServiceId;
 use crate::node::NodeListFailure;
+use crate::port::BackpressureFn;
 use crate::port::backpressure_strategy::BackpressureStrategy;
 use crate::port::port_name::PortName;
 use crate::port::progressive_publisher::ProgressivePublisher;
@@ -190,6 +191,15 @@ pub struct ProgressivePortFactoryPublisher<
 impl<'factory, Service: service::Service, UserHeader: Debug + ZeroCopySend>
     ProgressivePortFactoryPublisher<'factory, Service, UserHeader>
 {
+    /// Reduces the number of samples preallocated by the publisher.
+    pub fn override_sample_preallocation<F: Fn(usize) -> usize + 'static>(
+        mut self,
+        callback: F,
+    ) -> Self {
+        self.inner = self.inner.override_sample_preallocation(callback);
+        self
+    }
+
     /// Sets the initially reserved maximum byte capacity.
     pub fn initial_max_slice_len(mut self, value: usize) -> Self {
         self.inner = self.inner.initial_max_slice_len(value);
@@ -211,6 +221,12 @@ impl<'factory, Service: service::Service, UserHeader: Debug + ZeroCopySend>
     /// Sets queue-full backpressure behavior for sending a new frame.
     pub fn backpressure_strategy(mut self, value: BackpressureStrategy) -> Self {
         self.inner = self.inner.backpressure_strategy(value);
+        self
+    }
+
+    /// Installs a handler for queue-full backpressure while sending a frame.
+    pub fn set_backpressure_handler<F: BackpressureFn + 'static>(mut self, handler: F) -> Self {
+        self.inner = self.inner.set_backpressure_handler(handler);
         self
     }
 

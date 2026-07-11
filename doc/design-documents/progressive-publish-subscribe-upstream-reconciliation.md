@@ -69,3 +69,16 @@ published prefix and observes this derived abort.
 - Miri does not validate external DMA behavior. Raw pointers copied by an
   external writer cannot be revoked by Rust; using them after a terminal
   operation remains a caller contract violation.
+
+## Configuration matrix
+
+| Area | Axis | Permutation | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Allocation layout | Allocation strategy | Static | `static_allocations_preserve_control_payload_and_stride_alignment` | Covered | Checks three simultaneous loans. |
+| Allocation layout | Allocation strategy | BestFit | `best_fit_allocations_preserve_control_payload_and_stride_alignment` | Covered | Checks the resizable best-fit segment. |
+| Allocation layout | Allocation strategy | PowerOfTwo | `power_of_two_allocations_preserve_control_payload_and_stride_alignment` | Covered | Checks the resizable power-of-two segment. |
+| Payload layout | Requested alignment | 128-byte minimum | All three allocation-strategy tests | Covered | Header, payload, and stride remain 128-byte isolated. |
+| Payload layout | Requested alignment | 4096 bytes | `progressive_mode_preserves_larger_requested_payload_alignment` | Covered | Progressive mode preserves alignments larger than its minimum. |
+| Delivery failure | Receiver outcome | Earlier receiver succeeds, later receiver fails | `partial_delivery_failure_aborts_and_preserves_reference_accounting` | Covered | Uses deterministic backpressure failure injection. |
+| Process failure | Dead participant | Publisher | `abrupt_publisher_process_death_is_reported_as_abort` | Covered | Uses liveness-derived abort. |
+| Process failure | Dead participant | Subscriber | `abrupt_subscriber_process_death_reclaims_held_progressive_sample` | Covered | Uses a single preallocated chunk to prove reclamation. |

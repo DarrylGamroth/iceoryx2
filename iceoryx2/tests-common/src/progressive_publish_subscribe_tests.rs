@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use iceoryx2::port::publisher::PublisherCreateError;
+use iceoryx2::port::{BackpressureAction, LoanError};
 use iceoryx2::prelude::*;
 use iceoryx2::progressive_sample_mut::ProgressiveWriteError;
 use iceoryx2::service::header::progressive_publish_subscribe::{
@@ -202,8 +203,7 @@ fn multiple_subscribers_observe_identical_content_at_independent_speeds() {
     assert_eq!(second_sample.state(), ProgressiveSampleState::Complete);
 }
 
-#[test]
-fn consecutive_allocations_preserve_control_payload_and_stride_alignment() {
+fn assert_consecutive_allocation_alignment(allocation_strategy: AllocationStrategy) {
     let config = generate_isolated_config();
     let node = NodeBuilder::new()
         .config(&config)
@@ -220,7 +220,7 @@ fn consecutive_allocations_preserve_control_payload_and_stride_alignment() {
         .publisher_builder()
         .initial_max_slice_len(64)
         .max_loaned_samples(4)
-        .allocation_strategy(AllocationStrategy::Static)
+        .allocation_strategy(allocation_strategy)
         .create()
         .unwrap();
 
@@ -245,6 +245,62 @@ fn consecutive_allocations_preserve_control_payload_and_stride_alignment() {
     }
     for pair in payloads.windows(2) {
         assert_eq!((pair[1] - pair[0]) % PROGRESSIVE_CONTROL_ALIGNMENT, 0);
+    }
+}
+
+#[test]
+fn static_allocations_preserve_control_payload_and_stride_alignment() {
+    assert_consecutive_allocation_alignment(AllocationStrategy::Static);
+}
+
+#[test]
+fn best_fit_allocations_preserve_control_payload_and_stride_alignment() {
+    assert_consecutive_allocation_alignment(AllocationStrategy::BestFit);
+}
+
+#[test]
+fn power_of_two_allocations_preserve_control_payload_and_stride_alignment() {
+    assert_consecutive_allocation_alignment(AllocationStrategy::PowerOfTwo);
+}
+
+#[test]
+fn progressive_mode_preserves_larger_requested_payload_alignment() {
+    let config = generate_isolated_config();
+    let node = NodeBuilder::new()
+        .config(&config)
+        .create::<ipc::Service>()
+        .unwrap();
+    let service = node
+        .service_builder(&generate_service_name())
+        .publish_subscribe::<[u8]>()
+        .payload_alignment(Alignment::ALIGN_4096)
+        .progressive()
+        .create()
+        .unwrap();
+    assert_eq!(
+        service
+            .static_config()
+            .message_type_details()
+            .payload
+            .alignment(),
+        Alignment::ALIGN_4096.value()
+    );
+    let publisher = service
+        .publisher_builder()
+        .initial_max_slice_len(64)
+        .max_loaned_samples(3)
+        .create()
+        .unwrap();
+    let loans = [
+        publisher.loan_slice_uninit(64).unwrap(),
+        publisher.loan_slice_uninit(64).unwrap(),
+        publisher.loan_slice_uninit(64).unwrap(),
+    ];
+    for loan in &loans {
+        assert_eq!(
+            unsafe { loan.payload_mut_ptr() } as usize % Alignment::ALIGN_4096.value(),
+            0
+        );
     }
 }
 
@@ -396,6 +452,77 @@ fn queue_backpressure_is_evaluated_only_when_sending_a_new_frame() {
     assert!(subscriber.receive().unwrap().is_none());
     second.abort().unwrap();
     first.finish().unwrap();
+}
+
+#[test]
+fn partial_delivery_failure_aborts_and_preserves_reference_accounting() {
+    let config = generate_isolated_config();
+    let node = NodeBuilder::new()
+        .config(&config)
+        .create::<ipc::Service>()
+        .unwrap();
+    let service = node
+        .service_builder(&generate_service_name())
+        .publish_subscribe::<[u8]>()
+        .max_subscribers(2)
+        .subscriber_max_buffer_size(1)
+        .subscriber_max_borrowed_samples(1)
+        .progressive()
+        .create()
+        .unwrap();
+    let publisher = service
+        .publisher_builder()
+        .initial_max_slice_len(8)
+        .max_loaned_samples(2)
+        .allocation_strategy(AllocationStrategy::Static)
+        .override_sample_preallocation(|_| 2)
+        .backpressure_strategy(BackpressureStrategy::RetryUntilDelivered)
+        .set_backpressure_handler(|_| BackpressureAction::DiscardDataAndFail)
+        .create()
+        .unwrap();
+    let first = service
+        .subscriber_builder()
+        .buffer_size(1)
+        .create()
+        .unwrap();
+    let second = service
+        .subscriber_builder()
+        .buffer_size(1)
+        .create()
+        .unwrap();
+
+    // Fill only the later subscriber's queue: both receive this offset, then
+    // the first subscriber returns its reference while the second retains it.
+    let prefill = publisher.loan_slice_uninit(8).unwrap().send().unwrap();
+    drop(first.receive().unwrap().unwrap());
+    prefill.finish().unwrap();
+
+    // Delivery reaches the first subscriber before the full second queue
+    // causes the injected error. The failed send publishes Aborted and returns
+    // its publisher loan exactly once.
+    let failed_loan = publisher.loan_slice_uninit(8).unwrap();
+    let failed_payload = unsafe { failed_loan.payload_mut_ptr() };
+    assert!(failed_loan.send().is_err());
+    let aborted = first.receive().unwrap().unwrap();
+    assert_eq!(aborted.state(), ProgressiveSampleState::Aborted);
+
+    // The two preallocated chunks are both still held by subscriber
+    // references, proving the failed send did not release the delivered
+    // subscriber reference or double-release the publisher reference.
+    assert_eq!(
+        publisher.loan_slice_uninit(8).unwrap_err(),
+        LoanError::OutOfMemory
+    );
+
+    drop(aborted);
+    let reclaimed = publisher.loan_slice_uninit(8).unwrap();
+    assert_eq!(unsafe { reclaimed.payload_mut_ptr() }, failed_payload);
+    assert_eq!(
+        publisher.loan_slice_uninit(8).unwrap_err(),
+        LoanError::OutOfMemory
+    );
+    drop(reclaimed);
+    drop(second.receive().unwrap().unwrap());
 }
 
 #[cfg(feature = "std")]
@@ -669,4 +796,110 @@ fn abrupt_publisher_process_death_is_reported_as_abort() {
     let mut publisher = spawn("publisher");
     assert!(!publisher.wait().unwrap().success());
     assert!(subscriber.wait().unwrap().success());
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn abrupt_subscriber_process_death_reclaims_held_progressive_sample() {
+    const ROLE: &str = "IOX2_PROGRESSIVE_SUBSCRIBER_DEATH_ROLE";
+    const NAME: &str = "IOX2_PROGRESSIVE_SUBSCRIBER_DEATH_SERVICE";
+    const READY: &str = "IOX2_PROGRESSIVE_SUBSCRIBER_DEATH_READY";
+
+    if let (Ok(role), Ok(service_name), Ok(ready_path)) = (
+        std::env::var(ROLE),
+        std::env::var(NAME),
+        std::env::var(READY),
+    ) {
+        assert_eq!(role, "subscriber");
+        let node = NodeBuilder::new().create::<ipc::Service>().unwrap();
+        let name: ServiceName = service_name.as_str().try_into().unwrap();
+        let service = node
+            .service_builder(&name)
+            .publish_subscribe::<[u8]>()
+            .progressive()
+            .open()
+            .unwrap();
+        let subscriber = service
+            .subscriber_builder()
+            .buffer_size(1)
+            .create()
+            .unwrap();
+        std::fs::write(&ready_path, b"ready").unwrap();
+        let deadline = std::time::Instant::now() + core::time::Duration::from_secs(5);
+        loop {
+            if subscriber.receive().unwrap().is_some() {
+                // Exit without returning the held sample through its completion
+                // queue or running any subscriber/node destructors.
+                std::process::abort();
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
+
+    let node = NodeBuilder::new().create::<ipc::Service>().unwrap();
+    let service_name = generate_service_name();
+    let service = node
+        .service_builder(&service_name)
+        .publish_subscribe::<[u8]>()
+        .max_subscribers(1)
+        .subscriber_max_buffer_size(1)
+        .subscriber_max_borrowed_samples(1)
+        .progressive()
+        .create()
+        .unwrap();
+    let publisher = service
+        .publisher_builder()
+        .initial_max_slice_len(8)
+        .max_loaned_samples(1)
+        .allocation_strategy(AllocationStrategy::Static)
+        .override_sample_preallocation(|_| 1)
+        .create()
+        .unwrap();
+
+    let ready_path = std::env::temp_dir().join(format!(
+        "iox2-progressive-subscriber-death-{}",
+        service_name
+    ));
+    let _ = std::fs::remove_file(&ready_path);
+    let executable = std::env::current_exe().unwrap();
+    let mut subscriber = std::process::Command::new(executable)
+        .arg("abrupt_subscriber_process_death_reclaims_held_progressive_sample")
+        .env(ROLE, "subscriber")
+        .env(NAME, service_name.to_string())
+        .env(READY, &ready_path)
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + core::time::Duration::from_secs(5);
+    while !ready_path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for subscriber readiness"
+        );
+        std::thread::sleep(core::time::Duration::from_millis(10));
+    }
+
+    let mut writer = publisher.loan_slice_uninit(8).unwrap().send().unwrap();
+    writer.write_from_slice(&[1, 2, 3, 4]).unwrap();
+    assert!(!subscriber.wait().unwrap().success());
+    writer.finish().unwrap();
+
+    let cleanup_deadline = std::time::Instant::now() + core::time::Duration::from_secs(5);
+    let reclaimed = loop {
+        let _ = service.try_cleanup_dead_nodes();
+        match publisher.loan_slice_uninit(8) {
+            Ok(sample) => break sample,
+            Err(LoanError::OutOfMemory) => {
+                assert!(
+                    std::time::Instant::now() < cleanup_deadline,
+                    "dead subscriber permanently pinned the allocation"
+                );
+                std::thread::sleep(core::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("unexpected loan error after subscriber death: {error:?}"),
+        }
+    };
+    drop(reclaimed);
+    let _ = std::fs::remove_file(ready_path);
 }
