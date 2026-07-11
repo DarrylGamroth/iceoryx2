@@ -39,13 +39,33 @@ explicitly outside this implementation.
 - Version 1 includes `write_from_slice`; external acquisition uses the unsafe
   pointer and watermark APIs. WaitSet notification remains deferred.
 
-## Crash behavior retained from upstream
+## Crash behavior
 
 A graceful active-writer drop release-stores `Aborted`. An abrupt publisher
-process death cannot run that drop and therefore cannot publish a terminal
-state into an already borrowed sample. Existing receiver mappings and
-whole-sample cleanup keep the allocation from being unsafely reused while a
-subscriber lease exists, but its state remains `Filling`. Applications need a
-node-death/timeout policy for this case until a future cleanup-owned terminal
-marker is designed. This is a liveness uncertainty, not permission to infer
-DMA coherence or to read beyond the watermark.
+process death cannot run that drop and cleanup cannot safely enumerate private
+publisher allocations to mutate their headers. Existing receiver mappings and
+whole-sample cleanup still keep a borrowed allocation from being unsafely
+reused.
+
+`ProgressiveSample::state_with_publisher_liveness()` resolves the terminal
+liveness question explicitly. It first performs the ordinary acquire state
+load and, only while the sample is still `Filling`, queries node monitoring. A
+dead or already-cleaned origin is reported as a derived `Aborted` state without
+modifying the shared header. The regular `state()` call remains an allocation-
+and syscall-free atomic hot path. A multi-process test terminates the publisher
+without running destructors and verifies that the subscriber retains its
+published prefix and observes this derived abort.
+
+## Verification boundaries
+
+- Nightly Miri validates an in-process concurrent model that constructs only
+  raw-pointer-derived unpublished write regions and acquire-bounded immutable
+  prefixes.
+- Compile-fail documentation tests cover the absence of whole-payload mutable
+  access, mutable user-header access, `DerefMut`, and payload borrows that
+  outlive the subscriber lease.
+- A counting global allocator test verifies zero allocations across repeated
+  `write_from_slice`, `published_len`, `payload`, and `state` calls.
+- Miri does not validate external DMA behavior. Raw pointers copied by an
+  external writer cannot be revoked by Rust; using them after a terminal
+  operation remains a caller contract violation.

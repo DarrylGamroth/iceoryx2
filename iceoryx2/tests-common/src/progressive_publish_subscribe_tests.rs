@@ -580,3 +580,93 @@ fn multi_process_progressive_stress_has_no_torn_blocks() {
     assert!(first.wait().unwrap().success());
     assert!(second.wait().unwrap().success());
 }
+
+#[cfg(feature = "std")]
+#[test]
+fn abrupt_publisher_process_death_is_reported_as_abort() {
+    const ROLE: &str = "IOX2_PROGRESSIVE_CRASH_TEST_ROLE";
+    const NAME: &str = "IOX2_PROGRESSIVE_CRASH_TEST_SERVICE";
+
+    let run_role = |role: &str, service_name: &str| {
+        let node = NodeBuilder::new().create::<ipc::Service>().unwrap();
+        let name: ServiceName = service_name.try_into().unwrap();
+        let service = node
+            .service_builder(&name)
+            .publish_subscribe::<[u8]>()
+            .progressive()
+            .open_or_create()
+            .unwrap();
+
+        if role == "publisher" {
+            let publisher = service
+                .publisher_builder()
+                .initial_max_slice_len(16)
+                .create()
+                .unwrap();
+            std::thread::sleep(core::time::Duration::from_millis(250));
+            let mut writer = publisher.loan_slice_uninit(16).unwrap().send().unwrap();
+            writer.write_from_slice(&[1, 2, 3, 4]).unwrap();
+            // Model an abrupt process failure: neither writer nor publisher
+            // destructors run, so no shared Aborted store is possible.
+            std::process::abort();
+        }
+
+        let subscriber = service.subscriber_builder().create().unwrap();
+        let deadline = std::time::Instant::now() + core::time::Duration::from_secs(5);
+        let sample = loop {
+            if let Some(sample) = subscriber.receive().unwrap() {
+                break sample;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for frame"
+            );
+            std::thread::yield_now();
+        };
+        while sample.published_len() < 4 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for published prefix"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(sample.payload(), &[1, 2, 3, 4]);
+
+        loop {
+            if sample.state_with_publisher_liveness().unwrap() == ProgressiveSampleState::Aborted {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out detecting dead publisher"
+            );
+            std::thread::sleep(core::time::Duration::from_millis(10));
+        }
+
+        // Already published bytes remain readable after the derived abort.
+        assert_eq!(sample.payload(), &[1, 2, 3, 4]);
+    };
+
+    if let (Ok(role), Ok(service_name)) = (std::env::var(ROLE), std::env::var(NAME)) {
+        run_role(&role, &service_name);
+        return;
+    }
+
+    let service_name = generate_service_name().to_string();
+    let executable = std::env::current_exe().unwrap();
+    let filter = "abrupt_publisher_process_death_is_reported_as_abort";
+    let spawn = |role: &str| {
+        std::process::Command::new(&executable)
+            .arg(filter)
+            .env(ROLE, role)
+            .env(NAME, &service_name)
+            .spawn()
+            .unwrap()
+    };
+
+    let mut subscriber = spawn("subscriber");
+    std::thread::sleep(core::time::Duration::from_millis(100));
+    let mut publisher = spawn("publisher");
+    assert!(!publisher.wait().unwrap().success());
+    assert!(subscriber.wait().unwrap().success());
+}
