@@ -46,6 +46,12 @@ use super::nodes;
 use super::{publisher::PortFactoryPublisher, subscriber::PortFactorySubscriber};
 use crate::identifiers::UniqueServiceId;
 use crate::node::NodeListFailure;
+use crate::port::backpressure_strategy::BackpressureStrategy;
+use crate::port::port_name::PortName;
+use crate::port::progressive_publisher::ProgressivePublisher;
+use crate::port::progressive_subscriber::ProgressiveSubscriber;
+use crate::port::publisher::PublisherCreateError;
+use crate::port::subscriber::SubscriberCreateError;
 use crate::service::attribute::AttributeSet;
 use crate::service::marker::Flatbuffer;
 use crate::service::resource::publish_subscribe::PublishSubscribeResources;
@@ -59,6 +65,7 @@ use iceoryx2_bb_elementary_traits::non_null::NonNullCompat;
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
 use iceoryx2_cal::dynamic_storage::DynamicStorage;
+use iceoryx2_cal::shm_allocator::AllocationStrategy;
 
 /// The factory for
 /// [`MessagingPattern::PublishSubscribe`](crate::service::messaging_pattern::MessagingPattern::PublishSubscribe).
@@ -74,6 +81,185 @@ pub struct PortFactory<
     pub(crate) service: SharedServiceState<Service, PublishSubscribeResources<Service>>,
     _payload: PhantomData<Payload>,
     _user_header: PhantomData<UserHeader>,
+}
+
+/// Port factory for experimental single-publisher progressive byte slices.
+#[derive(Debug)]
+pub struct ProgressivePortFactory<Service: service::Service, UserHeader: Debug + ZeroCopySend> {
+    inner: PortFactory<Service, [u8], UserHeader>,
+}
+
+unsafe impl<Service: service::Service, UserHeader: Debug + ZeroCopySend> Send
+    for ProgressivePortFactory<Service, UserHeader>
+{
+}
+unsafe impl<Service: service::Service, UserHeader: Debug + ZeroCopySend> Sync
+    for ProgressivePortFactory<Service, UserHeader>
+{
+}
+
+impl<Service: service::Service, UserHeader: Debug + ZeroCopySend> Abandonable
+    for ProgressivePortFactory<Service, UserHeader>
+{
+    unsafe fn abandon_in_place(mut this: NonNull<Self>) {
+        let this = unsafe { this.as_mut() };
+        unsafe { PortFactory::abandon_in_place(NonNull::iox2_from_mut(&mut this.inner)) };
+    }
+}
+
+impl<Service: service::Service, UserHeader: Debug + ZeroCopySend>
+    crate::service::port_factory::PortFactory for ProgressivePortFactory<Service, UserHeader>
+{
+    type Service = Service;
+    type StaticConfig = static_config::publish_subscribe::StaticConfig;
+    type DynamicConfig = dynamic_config::publish_subscribe::DynamicConfig;
+
+    fn name(&self) -> &ServiceName {
+        self.inner.service.static_config().name()
+    }
+
+    fn unique_service_id(&self) -> UniqueServiceId {
+        self.inner.service.static_config().unique_service_id()
+    }
+
+    fn service_hash(&self) -> &ServiceHash {
+        self.inner.service.static_config().service_hash()
+    }
+
+    fn attributes(&self) -> &AttributeSet {
+        self.inner.service.static_config().attributes()
+    }
+
+    fn static_config(&self) -> &Self::StaticConfig {
+        self.inner.service.static_config().publish_subscribe()
+    }
+
+    fn dynamic_config(&self) -> &Self::DynamicConfig {
+        self.inner
+            .service
+            .dynamic_storage()
+            .get()
+            .publish_subscribe()
+    }
+
+    fn nodes<F: FnMut(crate::node::NodeState<Service>) -> CallbackProgression>(
+        &self,
+        callback: F,
+    ) -> Result<(), NodeListFailure> {
+        nodes(
+            self.inner.service.dynamic_storage().get(),
+            self.inner.service.shared_node().config(),
+            callback,
+        )
+    }
+}
+
+impl<Service: service::Service, UserHeader: Debug + ZeroCopySend>
+    ProgressivePortFactory<Service, UserHeader>
+{
+    pub(crate) fn new(inner: PortFactory<Service, [u8], UserHeader>) -> Self {
+        Self { inner }
+    }
+
+    /// Returns a builder for the single progressive publisher.
+    pub fn publisher_builder(&self) -> ProgressivePortFactoryPublisher<'_, Service, UserHeader> {
+        ProgressivePortFactoryPublisher {
+            inner: self.inner.publisher_builder(),
+        }
+    }
+
+    /// Returns a builder for a progressive subscriber.
+    pub fn subscriber_builder(&self) -> ProgressivePortFactorySubscriber<'_, Service, UserHeader> {
+        ProgressivePortFactorySubscriber {
+            inner: self.inner.subscriber_builder(),
+        }
+    }
+}
+
+/// Builder for a progressive publisher endpoint.
+#[derive(Debug)]
+pub struct ProgressivePortFactoryPublisher<
+    'factory,
+    Service: service::Service,
+    UserHeader: Debug + ZeroCopySend,
+> {
+    inner: PortFactoryPublisher<'factory, Service, [u8], UserHeader>,
+}
+
+impl<'factory, Service: service::Service, UserHeader: Debug + ZeroCopySend>
+    ProgressivePortFactoryPublisher<'factory, Service, UserHeader>
+{
+    /// Sets the initially reserved maximum byte capacity.
+    pub fn initial_max_slice_len(mut self, value: usize) -> Self {
+        self.inner = self.inner.initial_max_slice_len(value);
+        self
+    }
+
+    /// Sets the maximum number of simultaneous publisher loans.
+    pub fn max_loaned_samples(mut self, value: usize) -> Self {
+        self.inner = self.inner.max_loaned_samples(value);
+        self
+    }
+
+    /// Sets the allocation strategy.
+    pub fn allocation_strategy(mut self, value: AllocationStrategy) -> Self {
+        self.inner = self.inner.allocation_strategy(value);
+        self
+    }
+
+    /// Sets queue-full backpressure behavior for sending a new frame.
+    pub fn backpressure_strategy(mut self, value: BackpressureStrategy) -> Self {
+        self.inner = self.inner.backpressure_strategy(value);
+        self
+    }
+
+    /// Sets the publisher name.
+    pub fn name(mut self, value: &PortName) -> Self {
+        self.inner = self.inner.name(value);
+        self
+    }
+
+    /// Creates the progressive publisher.
+    pub fn create(self) -> Result<ProgressivePublisher<Service, UserHeader>, PublisherCreateError> {
+        Ok(ProgressivePublisher {
+            inner: self.inner.create()?,
+        })
+    }
+}
+
+/// Builder for a progressive subscriber endpoint.
+#[derive(Debug)]
+pub struct ProgressivePortFactorySubscriber<
+    'factory,
+    Service: service::Service,
+    UserHeader: Debug + ZeroCopySend,
+> {
+    inner: PortFactorySubscriber<'factory, Service, [u8], UserHeader>,
+}
+
+impl<'factory, Service: service::Service, UserHeader: Debug + ZeroCopySend>
+    ProgressivePortFactorySubscriber<'factory, Service, UserHeader>
+{
+    /// Sets the subscriber queue capacity in samples.
+    pub fn buffer_size(mut self, value: usize) -> Self {
+        self.inner = self.inner.buffer_size(value);
+        self
+    }
+
+    /// Sets the subscriber name.
+    pub fn name(mut self, value: &PortName) -> Self {
+        self.inner = self.inner.name(value);
+        self
+    }
+
+    /// Creates a progressive subscriber.
+    pub fn create(
+        self,
+    ) -> Result<ProgressiveSubscriber<Service, UserHeader>, SubscriberCreateError> {
+        Ok(ProgressiveSubscriber {
+            inner: self.inner.create()?,
+        })
+    }
 }
 
 unsafe impl<

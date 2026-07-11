@@ -1,0 +1,12 @@
+# Copyright (c) 2026 Contributors to the Eclipse Foundation
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+rust_binary(
+    name = "polling",
+    srcs = ["polling.rs"],
+    deps = [
+        "//iceoryx2:iceoryx2",
+    ],
+)
