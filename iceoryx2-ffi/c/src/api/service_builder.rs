@@ -14,6 +14,7 @@
 
 use crate::api::{AssertNonNullHandle, HandleToType, iox2_service_type_e};
 use crate::{
+    iox2_service_builder_progressive_pub_sub_set_user_header_type_details,
     iox2_service_builder_pub_sub_set_user_header_type_details,
     iox2_service_builder_request_response_set_request_header_type_details,
     iox2_service_builder_request_response_set_response_header_type_details, iox2_type_variant_e,
@@ -44,6 +45,7 @@ pub(super) union ServiceBuilderUnionNested<S: Service> {
     pub(super) base: ManuallyDrop<ServiceBuilderBase<S>>,
     pub(super) event: ManuallyDrop<ServiceBuilderEvent<S>>,
     pub(super) pub_sub: ManuallyDrop<ServiceBuilderPubSub<PayloadFfi, UserHeaderFfi, S>>,
+    pub(super) progressive_pub_sub: ManuallyDrop<ServiceBuilderPubSub<[u8], UserHeaderFfi, S>>,
     pub(super) request_response: ManuallyDrop<
         ServiceBuilderRequestResponse<PayloadFfi, UserHeaderFfi, PayloadFfi, UserHeaderFfi, S>,
     >,
@@ -79,6 +81,16 @@ impl ServiceBuilderUnion {
         Self {
             ipc: ManuallyDrop::new(ServiceBuilderUnionNested::<crate::IpcService> {
                 pub_sub: ManuallyDrop::new(service_builder),
+            }),
+        }
+    }
+
+    pub(super) fn new_ipc_progressive_pub_sub(
+        service_builder: ServiceBuilderPubSub<[u8], UserHeaderFfi, crate::IpcService>,
+    ) -> Self {
+        Self {
+            ipc: ManuallyDrop::new(ServiceBuilderUnionNested::<crate::IpcService> {
+                progressive_pub_sub: ManuallyDrop::new(service_builder),
             }),
         }
     }
@@ -143,6 +155,16 @@ impl ServiceBuilderUnion {
         Self {
             local: ManuallyDrop::new(ServiceBuilderUnionNested::<crate::LocalService> {
                 pub_sub: ManuallyDrop::new(service_builder),
+            }),
+        }
+    }
+
+    pub(super) fn new_local_progressive_pub_sub(
+        service_builder: ServiceBuilderPubSub<[u8], UserHeaderFfi, crate::LocalService>,
+    ) -> Self {
+        Self {
+            local: ManuallyDrop::new(ServiceBuilderUnionNested::<crate::LocalService> {
+                progressive_pub_sub: ManuallyDrop::new(service_builder),
             }),
         }
     }
@@ -229,6 +251,14 @@ pub type iox2_service_builder_pub_sub_h = *mut iox2_service_builder_pub_sub_h_t;
 /// The non-owning handle for `iox2_service_builder_t` which is already configured as event. Passing the handle to an function does not transfers the ownership.
 pub type iox2_service_builder_pub_sub_h_ref = *const iox2_service_builder_pub_sub_h;
 
+pub struct iox2_service_builder_progressive_pub_sub_h_t;
+/// The owning handle for a service builder configured for progressive byte-slice publish-subscribe.
+pub type iox2_service_builder_progressive_pub_sub_h =
+    *mut iox2_service_builder_progressive_pub_sub_h_t;
+/// A non-owning progressive publish-subscribe service-builder handle.
+pub type iox2_service_builder_progressive_pub_sub_h_ref =
+    *const iox2_service_builder_progressive_pub_sub_h;
+
 pub struct iox2_service_builder_request_response_h_t;
 /// The owning handle for `iox2_service_builder_t` which is already configured as event. Passing the handle to an function transfers the ownership.
 pub type iox2_service_builder_request_response_h = *mut iox2_service_builder_request_response_h_t;
@@ -272,6 +302,21 @@ impl AssertNonNullHandle for iox2_service_builder_pub_sub_h {
 }
 
 impl AssertNonNullHandle for iox2_service_builder_pub_sub_h_ref {
+    fn assert_non_null(self) {
+        debug_assert!(!self.is_null());
+        unsafe {
+            debug_assert!(!(*self).is_null());
+        }
+    }
+}
+
+impl AssertNonNullHandle for iox2_service_builder_progressive_pub_sub_h {
+    fn assert_non_null(self) {
+        debug_assert!(!self.is_null());
+    }
+}
+
+impl AssertNonNullHandle for iox2_service_builder_progressive_pub_sub_h_ref {
     fn assert_non_null(self) {
         debug_assert!(!self.is_null());
         unsafe {
@@ -366,6 +411,22 @@ impl HandleToType for iox2_service_builder_pub_sub_h {
 }
 
 impl HandleToType for iox2_service_builder_pub_sub_h_ref {
+    type Target = *mut iox2_service_builder_t;
+
+    fn as_type(self) -> Self::Target {
+        unsafe { *self as *mut _ as _ }
+    }
+}
+
+impl HandleToType for iox2_service_builder_progressive_pub_sub_h {
+    type Target = *mut iox2_service_builder_t;
+
+    fn as_type(self) -> Self::Target {
+        self as *mut _ as _
+    }
+}
+
+impl HandleToType for iox2_service_builder_progressive_pub_sub_h_ref {
     type Target = *mut iox2_service_builder_t;
 
     fn as_type(self) -> Self::Target {
@@ -524,6 +585,57 @@ pub unsafe extern "C" fn iox2_service_builder_pub_sub(
         );
 
         service_builder_handle as *mut _ as _
+    }
+}
+
+/// Transforms a base service builder into an experimental progressive byte-slice
+/// publish-subscribe service builder.
+///
+/// The resulting service always has one publisher, no history, and no safe overflow.
+///
+/// # Safety
+///
+/// * `service_builder_handle` must be a valid owning handle obtained from
+///   [`iox2_node_service_builder`](crate::iox2_node_service_builder).
+/// * The input handle is invalid after this call and ownership is transferred to the returned handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iox2_service_builder_progressive_pub_sub(
+    service_builder_handle: iox2_service_builder_h,
+) -> iox2_service_builder_progressive_pub_sub_h {
+    debug_assert!(!service_builder_handle.is_null());
+    unsafe {
+        let service_builder_struct = &mut *service_builder_handle.as_type();
+        match service_builder_struct.service_type {
+            iox2_service_type_e::IPC => {
+                let nested = ManuallyDrop::take(&mut service_builder_struct.value.as_mut().ipc);
+                let base = ManuallyDrop::into_inner(nested.base);
+                service_builder_struct.set(ServiceBuilderUnion::new_ipc_progressive_pub_sub(
+                    base.publish_subscribe::<[u8]>()
+                        .user_header::<UserHeaderFfi>(),
+                ));
+            }
+            iox2_service_type_e::LOCAL => {
+                let nested = ManuallyDrop::take(&mut service_builder_struct.value.as_mut().local);
+                let base = ManuallyDrop::into_inner(nested.base);
+                service_builder_struct.set(ServiceBuilderUnion::new_local_progressive_pub_sub(
+                    base.publish_subscribe::<[u8]>()
+                        .user_header::<UserHeaderFfi>(),
+                ));
+            }
+        }
+
+        let progressive_handle = service_builder_handle as *mut _ as _;
+        let user_header_type_name = "()";
+        let result = iox2_service_builder_progressive_pub_sub_set_user_header_type_details(
+            &progressive_handle,
+            iox2_type_variant_e::FIXED_SIZE,
+            user_header_type_name.as_ptr().cast(),
+            user_header_type_name.len(),
+            0,
+            1,
+        );
+        debug_assert_eq!(result, crate::IOX2_OK);
+        progressive_handle
     }
 }
 

@@ -82,3 +82,28 @@ published prefix and observes this derived abort.
 | Delivery failure | Receiver outcome | Earlier receiver succeeds, later receiver fails | `partial_delivery_failure_aborts_and_preserves_reference_accounting` | Covered | Uses deterministic backpressure failure injection. |
 | Process failure | Dead participant | Publisher | `abrupt_publisher_process_death_is_reported_as_abort` | Covered | Uses liveness-derived abort. |
 | Process failure | Dead participant | Subscriber | `abrupt_subscriber_process_death_reclaims_held_progressive_sample` | Covered | Uses a single preallocated chunk to prove reclamation. |
+
+## C FFI traceability
+
+The experimental C binding uses separate progressive handle families rather
+than adding mode checks to ordinary publish/subscribe handles. Unless a
+function explicitly consumes an owning handle, all pointers returned from it
+remain valid only while that handle remains alive. The raw external-writer
+payload pointer is the documented exception: it may be retained across `send`
+and used until the resulting active writer is finished, aborted, or dropped.
+
+| ID | Requirement | Implementation | Verification | Status |
+| --- | --- | --- | --- | --- |
+| CFFI-01 | The C service transition creates only progressive `[u8]` services and retains the one-publisher, zero-history, non-overflowing restrictions. | `iox2_service_builder_progressive_pub_sub` and `service_builder_progressive_pub_sub` | `progressive_c_ffi_preserves_prefix_and_ownership` for IPC and local | Covered |
+| CFFI-02 | `send` transfers one private loan into one active-writer handle; finish, abort, and writer drop consume or release it exactly once. | `progressive_publisher` handle implementations | The FFI lifecycle test covers finish, explicit abort, and drop-induced abort. Rust core accounting tests remain authoritative for partial delivery. | Covered |
+| CFFI-03 | The application user header is mutable only before `send` and immutable afterward. | `iox2_progressive_sample_mut_uninit_user_header_mut`, writer/sample const accessors | The FFI lifecycle test initializes and reads a custom `FrameInfo` layout; no sent-writer mutable accessor exists. | Covered |
+| CFFI-04 | A subscriber obtains only one acquire-bounded immutable prefix snapshot, never full capacity. | `iox2_progressive_sample_payload` | The FFI lifecycle test observes lengths 4, 6, and 8 while capacity remains 32. | Covered |
+| CFFI-05 | External watermark publication is monotonic and bounded and documents initialization, immutability, and visibility obligations. | `iox2_progressive_sample_mut_set_published_len`, `iox2_progressive_write_error_e` | The FFI lifecycle test publishes externally written bytes and rejects a regressive watermark. | Covered |
+| CFFI-06 | The ABI supports IPC and local services with the same error/result conventions as ordinary C bindings. | All progressive C unions and existing `IntoCInt` mappings | One generic lifecycle test is instantiated for each backend; the generated header is compiled as C11. | Covered |
+| CFFI-07 | Requested payload alignment is preserved above the 128-byte progressive minimum. | Progressive builder type-detail preparation and C alignment setter | The FFI lifecycle test requests and checks 4096-byte payload alignment. | Covered |
+| CFFI-08 | C subscribers can distinguish filling, complete, abort, and liveness-derived publisher death without modifying shared state. | `iox2_progressive_sample_state` and `iox2_progressive_sample_state_with_publisher_liveness` | State transitions are covered in the FFI lifecycle test; abrupt publisher death remains covered by the Rust multi-process test. | Covered |
+
+WaitSet notification, DMA cache management, C++, Python, Julia, and
+camera-specific adapters remain outside this C ABI increment. The raw-pointer
+watermark function exposes the existing unsafe CPU/device visibility contract;
+it does not make external DMA coherent.

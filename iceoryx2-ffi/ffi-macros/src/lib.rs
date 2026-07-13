@@ -66,6 +66,7 @@ pub fn iceoryx2_ffi(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // Define all the names we need
     let struct_storage_name = format_ident!("iox2_{}_storage_t", stripped_struct_name);
+    let test_module_name = format_ident!("test_generated_{}", stripped_struct_name);
     let _struct_h_t_name = format_ident!("iox2_{}_h_t", stripped_struct_name);
     let struct_h_name = format_ident!("iox2_{}_h", stripped_struct_name);
     let _struct_h_ref_name = format_ident!("iox2_{}_h_ref", stripped_struct_name);
@@ -159,7 +160,7 @@ pub fn iceoryx2_ffi(args: TokenStream, input: TokenStream) -> TokenStream {
 
         #[cfg(test)]
         #[cfg(feature = "std")]
-        mod test_generated {
+        mod #test_module_name {
             use super::*;
 
             #[test]
