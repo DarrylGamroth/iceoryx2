@@ -859,6 +859,12 @@ impl<UserHeader: Debug + ZeroCopySend, ServiceType: service::Service>
             .message_type_details
             .payload
             .alignment = PROGRESSIVE_CONTROL_ALIGNMENT;
+        if let Some(details) = &self.inner.override_user_header_type {
+            self.inner
+                .config_details_mut()
+                .message_type_details
+                .user_header = *details;
+        }
         self.inner.adjust_payload_alignment();
     }
 
