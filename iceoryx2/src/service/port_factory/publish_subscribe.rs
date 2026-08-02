@@ -63,11 +63,10 @@ use crate::service::service_name::ServiceName;
 use crate::service::{self, ServiceState, SharedServiceState, dynamic_config, static_config};
 use core::ptr::NonNull;
 use core::{fmt::Debug, marker::PhantomData};
-use iceoryx2_bb_elementary::CallbackProgression;
+use iceoryx2_bb_elementary::{CallbackProgression, allocation_strategy::AllocationStrategy};
 use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
 use iceoryx2_cal::dynamic_storage::DynamicStorage;
-use iceoryx2_cal::shm_allocator::AllocationStrategy;
 
 /// The factory for
 /// [`MessagingPattern::PublishSubscribe`](crate::service::messaging_pattern::MessagingPattern::PublishSubscribe).
@@ -105,7 +104,7 @@ impl<Service: service::Service, UserHeader: Debug + ZeroCopySend> Abandonable
 {
     unsafe fn abandon_in_place(mut this: NonNull<Self>) {
         let this = unsafe { this.as_mut() };
-        unsafe { PortFactory::abandon_in_place(NonNull::iox2_from_mut(&mut this.inner)) };
+        unsafe { PortFactory::abandon_in_place(NonNull::from_mut(&mut this.inner)) };
     }
 }
 

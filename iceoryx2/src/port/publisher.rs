@@ -132,7 +132,6 @@ use crate::port::port_name::PortName;
 use crate::port::update_connections::{ConnectionFailure, UpdateConnections};
 use crate::prelude::{BackpressureStrategy, Flatbuffer};
 use crate::progressive_sample_mut::ProgressiveSampleMutUninit;
-use crate::raw_sample::RawSampleMut;
 use crate::sample_mut::SampleMut;
 use crate::sample_mut_uninit::SampleMutUninit;
 use crate::service::dynamic_config::publish_subscribe::{PublisherDetails, SubscriberDetails};
@@ -874,7 +873,7 @@ impl<Service: service::Service, UserHeader: Default + Debug + ZeroCopySend>
             payload: chunk.payload,
             capacity,
             offset_to_chunk: chunk.offset,
-            sample_size: chunk.size,
+            sample_size: chunk.layout().size(),
             owns_loan: true,
         })
     }
