@@ -84,7 +84,7 @@ fn complete_service_cannot_be_opened_as_progressive() {
 }
 
 #[test]
-fn watermark_is_monotonic_bounded_and_prefix_only() {
+fn committed_length_is_monotonic_bounded_and_prefix_only() {
     let config = generate_isolated_config();
     let node = NodeBuilder::new()
         .config(&config)
@@ -106,34 +106,70 @@ fn watermark_is_monotonic_bounded_and_prefix_only() {
 
     let mut loan = publisher.loan_slice_uninit(8).unwrap();
     loan.user_header_mut().sequence = 73;
-    let mut writer = loan.send().unwrap();
+    let mut writer = loan.announce().unwrap();
     let sample = subscriber.receive().unwrap().unwrap();
 
-    assert_eq!(sample.payload(), &[]);
-    assert_eq!(sample.state(), ProgressiveSampleState::Filling);
+    assert_eq!(sample.committed_payload(), &[]);
+    assert_eq!(sample.state(), ProgressiveSampleState::Active);
+    assert_eq!(sample.snapshot().committed_len(), 0);
+    assert_eq!(sample.snapshot().state(), ProgressiveSampleState::Active);
     assert_eq!(sample.user_header().sequence, 73);
 
     writer.write_from_slice(&[1, 2, 3]).unwrap();
-    assert_eq!(sample.payload(), &[1, 2, 3]);
-    let early_prefix = sample.payload();
+    assert_eq!(sample.committed_payload(), &[1, 2, 3]);
+    assert_eq!(sample.snapshot().committed_len(), 3);
+    assert_eq!(sample.snapshot().state(), ProgressiveSampleState::Active);
+    let early_prefix = sample.committed_payload();
 
-    unsafe { writer.set_published_len(3) }.unwrap();
+    unsafe { writer.commit_until(3) }.unwrap();
     assert_eq!(
-        unsafe { writer.set_published_len(2) }.unwrap_err(),
-        ProgressiveWriteError::PublishedLengthRegressed
+        unsafe { writer.commit_until(2) }.unwrap_err(),
+        ProgressiveWriteError::CommittedLengthRegressed
     );
     assert_eq!(
-        unsafe { writer.set_published_len(9) }.unwrap_err(),
-        ProgressiveWriteError::PublishedLengthExceedsCapacity
+        unsafe { writer.commit_until(9) }.unwrap_err(),
+        ProgressiveWriteError::CommittedLengthExceedsCapacity
     );
     assert_eq!(early_prefix, &[1, 2, 3]);
 
     writer.write_from_slice(&[4, 5]).unwrap();
-    assert_eq!(sample.payload(), &[1, 2, 3, 4, 5]);
-    writer.finish().unwrap();
-    assert_eq!(sample.state(), ProgressiveSampleState::Complete);
-    assert_eq!(sample.published_len(), 5);
-    assert_eq!(sample.payload(), &[1, 2, 3, 4, 5]);
+    assert_eq!(sample.committed_payload(), &[1, 2, 3, 4, 5]);
+    assert_eq!(sample.committed_since(3), &[4, 5]);
+    writer.complete().unwrap();
+    let terminal = sample.snapshot();
+    assert_eq!(terminal.state(), ProgressiveSampleState::Complete);
+    assert_eq!(terminal.committed_len(), 5);
+    assert_eq!(sample.committed_payload(), &[1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn subscriber_connecting_after_announcement_does_not_receive_active_sample() {
+    let config = generate_isolated_config();
+    let node = NodeBuilder::new()
+        .config(&config)
+        .create::<ipc::Service>()
+        .unwrap();
+    let service = node
+        .service_builder(&generate_service_name())
+        .publish_subscribe::<[u8]>()
+        .progressive()
+        .create()
+        .unwrap();
+    let publisher = service
+        .publisher_builder()
+        .initial_max_slice_len(8)
+        .create()
+        .unwrap();
+    let connected = service.subscriber_builder().create().unwrap();
+
+    let mut writer = publisher.loan_slice_uninit(8).unwrap().announce().unwrap();
+    writer.write_from_slice(&[1, 2, 3]).unwrap();
+    let active = connected.receive().unwrap().unwrap();
+
+    let late = service.subscriber_builder().create().unwrap();
+    assert!(late.receive().unwrap().is_none());
+    assert_eq!(active.committed_payload(), &[1, 2, 3]);
+    writer.complete().unwrap();
 }
 
 #[test]
@@ -156,7 +192,7 @@ fn active_writer_drop_aborts_and_offset_is_delivered_once() {
         .unwrap();
     let subscriber = service.subscriber_builder().create().unwrap();
 
-    let mut writer = publisher.loan_slice_uninit(8).unwrap().send().unwrap();
+    let mut writer = publisher.loan_slice_uninit(8).unwrap().announce().unwrap();
     let sample = subscriber.receive().unwrap().unwrap();
     assert!(subscriber.receive().unwrap().is_none());
     writer.write_from_slice(&[9, 8]).unwrap();
@@ -164,7 +200,7 @@ fn active_writer_drop_aborts_and_offset_is_delivered_once() {
     drop(writer);
 
     assert_eq!(sample.state(), ProgressiveSampleState::Aborted);
-    assert_eq!(sample.payload(), &[9, 8]);
+    assert_eq!(sample.committed_payload(), &[9, 8]);
 }
 
 #[test]
@@ -188,17 +224,20 @@ fn multiple_subscribers_observe_identical_content_at_independent_speeds() {
     let first = service.subscriber_builder().create().unwrap();
     let second = service.subscriber_builder().create().unwrap();
 
-    let mut writer = publisher.loan_slice_uninit(32).unwrap().send().unwrap();
+    let mut writer = publisher.loan_slice_uninit(32).unwrap().announce().unwrap();
     let first_sample = first.receive().unwrap().unwrap();
     let second_sample = second.receive().unwrap().unwrap();
 
     for block in 0..4u8 {
         let bytes = [block, block ^ 0x5a, block.wrapping_mul(17), 0xa5];
         writer.write_from_slice(&bytes).unwrap();
-        assert_eq!(first_sample.payload(), second_sample.payload());
-        assert_eq!(first_sample.published_len(), (block as usize + 1) * 4);
+        assert_eq!(
+            first_sample.committed_payload(),
+            second_sample.committed_payload()
+        );
+        assert_eq!(first_sample.committed_len(), (block as usize + 1) * 4);
     }
-    writer.finish().unwrap();
+    writer.complete().unwrap();
     assert_eq!(first_sample.state(), ProgressiveSampleState::Complete);
     assert_eq!(second_sample.state(), ProgressiveSampleState::Complete);
 }
@@ -305,7 +344,7 @@ fn progressive_mode_preserves_larger_requested_payload_alignment() {
 }
 
 #[test]
-fn unsent_drop_and_terminal_paths_return_publisher_loans() {
+fn unannounced_drop_and_terminal_paths_return_publisher_loans() {
     let config = generate_isolated_config();
     let node = NodeBuilder::new()
         .config(&config)
@@ -328,23 +367,23 @@ fn unsent_drop_and_terminal_paths_return_publisher_loans() {
     publisher
         .loan_slice_uninit(8)
         .unwrap()
-        .send()
+        .announce()
         .unwrap()
-        .finish()
+        .complete()
         .unwrap();
     publisher
         .loan_slice_uninit(8)
         .unwrap()
-        .send()
+        .announce()
         .unwrap()
         .abort()
         .unwrap();
-    drop(publisher.loan_slice_uninit(8).unwrap().send().unwrap());
+    drop(publisher.loan_slice_uninit(8).unwrap().announce().unwrap());
     assert!(publisher.loan_slice_uninit(8).is_ok());
 }
 
 #[test]
-fn subscriber_lease_prevents_allocation_reuse_after_publisher_finish() {
+fn subscriber_lease_prevents_allocation_reuse_after_publisher_completion() {
     let config = generate_isolated_config();
     let node = NodeBuilder::new()
         .config(&config)
@@ -364,11 +403,11 @@ fn subscriber_lease_prevents_allocation_reuse_after_publisher_finish() {
         .unwrap();
     let subscriber = service.subscriber_builder().create().unwrap();
 
-    let mut writer = publisher.loan_slice_uninit(8).unwrap().send().unwrap();
+    let mut writer = publisher.loan_slice_uninit(8).unwrap().announce().unwrap();
     let sample = subscriber.receive().unwrap().unwrap();
     writer.write_from_slice(&[42]).unwrap();
-    writer.finish().unwrap();
-    let held_payload = sample.payload().as_ptr();
+    writer.complete().unwrap();
+    let held_payload = sample.committed_payload().as_ptr();
 
     for _ in 0..8 {
         let loan = publisher.loan_slice_uninit(8).unwrap();
@@ -404,19 +443,19 @@ fn one_subscriber_may_drop_while_another_continues() {
     let first = service.subscriber_builder().create().unwrap();
     let second = service.subscriber_builder().create().unwrap();
 
-    let mut writer = publisher.loan_slice_uninit(8).unwrap().send().unwrap();
+    let mut writer = publisher.loan_slice_uninit(8).unwrap().announce().unwrap();
     let first_sample = first.receive().unwrap().unwrap();
     let second_sample = second.receive().unwrap().unwrap();
     writer.write_from_slice(&[1, 2, 3]).unwrap();
     drop(first_sample);
     writer.write_from_slice(&[4, 5]).unwrap();
-    assert_eq!(second_sample.payload(), &[1, 2, 3, 4, 5]);
-    writer.finish().unwrap();
+    assert_eq!(second_sample.committed_payload(), &[1, 2, 3, 4, 5]);
+    writer.complete().unwrap();
     assert_eq!(second_sample.state(), ProgressiveSampleState::Complete);
 }
 
 #[test]
-fn queue_backpressure_is_evaluated_only_when_sending_a_new_frame() {
+fn queue_backpressure_is_evaluated_only_when_announcing_a_new_frame() {
     let config = generate_isolated_config();
     let node = NodeBuilder::new()
         .config(&config)
@@ -441,17 +480,17 @@ fn queue_backpressure_is_evaluated_only_when_sending_a_new_frame() {
         .create()
         .unwrap();
 
-    let mut first = publisher.loan_slice_uninit(8).unwrap().send().unwrap();
+    let mut first = publisher.loan_slice_uninit(8).unwrap().announce().unwrap();
     first.write_from_slice(&[1, 2, 3, 4]).unwrap();
-    // Watermark updates did not enqueue another offset, so the queue still
+    // Commits did not enqueue another offset, so the queue still
     // contains exactly the first frame. Sending a second frame exercises the
     // configured queue-full policy.
-    let second = publisher.loan_slice_uninit(8).unwrap().send().unwrap();
+    let second = publisher.loan_slice_uninit(8).unwrap().announce().unwrap();
     let sample = subscriber.receive().unwrap().unwrap();
-    assert_eq!(sample.payload(), &[1, 2, 3, 4]);
+    assert_eq!(sample.committed_payload(), &[1, 2, 3, 4]);
     assert!(subscriber.receive().unwrap().is_none());
     second.abort().unwrap();
-    first.finish().unwrap();
+    first.complete().unwrap();
 }
 
 #[test]
@@ -493,21 +532,21 @@ fn partial_delivery_failure_aborts_and_preserves_reference_accounting() {
 
     // Fill only the later subscriber's queue: both receive this offset, then
     // the first subscriber returns its reference while the second retains it.
-    let prefill = publisher.loan_slice_uninit(8).unwrap().send().unwrap();
+    let prefill = publisher.loan_slice_uninit(8).unwrap().announce().unwrap();
     drop(first.receive().unwrap().unwrap());
-    prefill.finish().unwrap();
+    prefill.complete().unwrap();
 
     // Delivery reaches the first subscriber before the full second queue
-    // causes the injected error. The failed send publishes Aborted and returns
+    // causes the injected error. The failed announcement marks Aborted and returns
     // its publisher loan exactly once.
     let failed_loan = publisher.loan_slice_uninit(8).unwrap();
     let failed_payload = unsafe { failed_loan.payload_mut_ptr() };
-    assert!(failed_loan.send().is_err());
+    assert!(failed_loan.announce().is_err());
     let aborted = first.receive().unwrap().unwrap();
     assert_eq!(aborted.state(), ProgressiveSampleState::Aborted);
 
     // The two preallocated chunks are both still held by subscriber
-    // references, proving the failed send did not release the delivered
+    // references, proving the failed announcement did not release the delivered
     // subscriber reference or double-release the publisher reference.
     assert_eq!(
         publisher.loan_slice_uninit(8).unwrap_err(),
@@ -553,7 +592,7 @@ fn concurrent_prefix_stress_has_no_torn_blocks() {
     let writer = publisher
         .loan_slice_uninit(CAPACITY)
         .unwrap()
-        .send()
+        .announce()
         .unwrap();
     let first_sample = first.receive().unwrap().unwrap();
     let second_sample = second.receive().unwrap().unwrap();
@@ -570,14 +609,14 @@ fn concurrent_prefix_stress_has_no_torn_blocks() {
                     std::thread::yield_now();
                 }
             }
-            writer.finish().unwrap();
+            writer.complete().unwrap();
         });
 
         for (reader_index, sample) in [first_sample, second_sample].into_iter().enumerate() {
             scope.spawn(move || {
                 let mut consumed = 0;
                 while consumed < BLOCKS {
-                    let payload = sample.payload();
+                    let payload = sample.committed_payload();
                     while consumed < payload.len() / BLOCK_SIZE {
                         let start = consumed * BLOCK_SIZE;
                         let sequence =
@@ -592,11 +631,15 @@ fn concurrent_prefix_stress_has_no_torn_blocks() {
                         std::thread::yield_now();
                     }
                 }
-                while sample.state() == ProgressiveSampleState::Filling {
+                let terminal = loop {
+                    let snapshot = sample.snapshot();
+                    if snapshot.state() != ProgressiveSampleState::Active {
+                        break snapshot;
+                    }
                     std::thread::yield_now();
-                }
-                assert_eq!(sample.state(), ProgressiveSampleState::Complete);
-                assert_eq!(sample.published_len(), CAPACITY);
+                };
+                assert_eq!(terminal.state(), ProgressiveSampleState::Complete);
+                assert_eq!(terminal.committed_len(), CAPACITY);
             });
         }
     });
@@ -631,7 +674,7 @@ fn multi_process_progressive_stress_has_no_torn_blocks() {
             let mut writer = publisher
                 .loan_slice_uninit(CAPACITY)
                 .unwrap()
-                .send()
+                .announce()
                 .unwrap();
             for sequence in 0..BLOCKS as u64 {
                 let mut block = [0u8; BLOCK_SIZE];
@@ -642,7 +685,7 @@ fn multi_process_progressive_stress_has_no_torn_blocks() {
                     std::thread::yield_now();
                 }
             }
-            writer.finish().unwrap();
+            writer.complete().unwrap();
             std::thread::sleep(core::time::Duration::from_millis(100));
         } else {
             let subscriber = service.subscriber_builder().create().unwrap();
@@ -659,7 +702,7 @@ fn multi_process_progressive_stress_has_no_torn_blocks() {
             };
             let mut consumed = 0;
             while consumed < BLOCKS {
-                let payload = sample.payload();
+                let payload = sample.committed_payload();
                 while consumed < payload.len() / BLOCK_SIZE {
                     let start = consumed * BLOCK_SIZE;
                     let sequence =
@@ -673,11 +716,15 @@ fn multi_process_progressive_stress_has_no_torn_blocks() {
                 assert_ne!(sample.state(), ProgressiveSampleState::Aborted);
                 std::thread::yield_now();
             }
-            while sample.state() == ProgressiveSampleState::Filling {
+            let terminal = loop {
+                let snapshot = sample.snapshot();
+                if snapshot.state() != ProgressiveSampleState::Active {
+                    break snapshot;
+                }
                 std::thread::yield_now();
-            }
-            assert_eq!(sample.state(), ProgressiveSampleState::Complete);
-            assert_eq!(sample.published_len(), CAPACITY);
+            };
+            assert_eq!(terminal.state(), ProgressiveSampleState::Complete);
+            assert_eq!(terminal.committed_len(), CAPACITY);
         }
     };
 
@@ -731,7 +778,7 @@ fn abrupt_publisher_process_death_is_reported_as_abort() {
                 .create()
                 .unwrap();
             std::thread::sleep(core::time::Duration::from_millis(250));
-            let mut writer = publisher.loan_slice_uninit(16).unwrap().send().unwrap();
+            let mut writer = publisher.loan_slice_uninit(16).unwrap().announce().unwrap();
             writer.write_from_slice(&[1, 2, 3, 4]).unwrap();
             // Model an abrupt process failure: neither writer nor publisher
             // destructors run, so no shared Aborted store is possible.
@@ -750,28 +797,30 @@ fn abrupt_publisher_process_death_is_reported_as_abort() {
             );
             std::thread::yield_now();
         };
-        while sample.published_len() < 4 {
+        while sample.committed_len() < 4 {
             assert!(
                 std::time::Instant::now() < deadline,
-                "timed out waiting for published prefix"
+                "timed out waiting for committed prefix"
             );
             std::thread::yield_now();
         }
-        assert_eq!(sample.payload(), &[1, 2, 3, 4]);
+        assert_eq!(sample.committed_payload(), &[1, 2, 3, 4]);
 
-        loop {
-            if sample.state_with_publisher_liveness().unwrap() == ProgressiveSampleState::Aborted {
-                break;
+        let terminal = loop {
+            let snapshot = sample.snapshot_with_publisher_liveness().unwrap();
+            if snapshot.state() == ProgressiveSampleState::Aborted {
+                break snapshot;
             }
             assert!(
                 std::time::Instant::now() < deadline,
                 "timed out detecting dead publisher"
             );
             std::thread::sleep(core::time::Duration::from_millis(10));
-        }
+        };
+        assert_eq!(terminal.committed_len(), 4);
 
-        // Already published bytes remain readable after the derived abort.
-        assert_eq!(sample.payload(), &[1, 2, 3, 4]);
+        // Already committed bytes remain readable after the derived abort.
+        assert_eq!(sample.committed_payload(), &[1, 2, 3, 4]);
     };
 
     if let (Ok(role), Ok(service_name)) = (std::env::var(ROLE), std::env::var(NAME)) {
@@ -880,10 +929,10 @@ fn abrupt_subscriber_process_death_reclaims_held_progressive_sample() {
         std::thread::sleep(core::time::Duration::from_millis(10));
     }
 
-    let mut writer = publisher.loan_slice_uninit(8).unwrap().send().unwrap();
+    let mut writer = publisher.loan_slice_uninit(8).unwrap().announce().unwrap();
     writer.write_from_slice(&[1, 2, 3, 4]).unwrap();
     assert!(!subscriber.wait().unwrap().success());
-    writer.finish().unwrap();
+    writer.complete().unwrap();
 
     let cleanup_deadline = std::time::Instant::now() + core::time::Duration::from_secs(5);
     let reclaimed = loop {

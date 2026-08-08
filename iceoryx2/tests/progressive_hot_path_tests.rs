@@ -35,7 +35,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 #[test]
-fn publication_and_polling_hot_paths_do_not_allocate() {
+fn commit_and_polling_hot_paths_do_not_allocate() {
     const CAPACITY: usize = 128;
     let node = NodeBuilder::new()
         .create::<local_threadsafe::Service>()
@@ -55,7 +55,7 @@ fn publication_and_polling_hot_paths_do_not_allocate() {
     let mut writer = publisher
         .loan_slice_uninit(CAPACITY)
         .unwrap()
-        .send()
+        .announce()
         .unwrap();
     let sample = subscriber.receive().unwrap().unwrap();
 
@@ -63,13 +63,15 @@ fn publication_and_polling_hot_paths_do_not_allocate() {
     ALLOCATIONS.store(0, Ordering::SeqCst);
     for index in 0..CAPACITY {
         writer.write_from_slice(&[index as u8]).unwrap();
-        assert_eq!(sample.published_len(), index + 1);
-        assert_eq!(sample.payload()[index], index as u8);
+        let snapshot = sample.snapshot();
+        assert_eq!(snapshot.committed_len(), index + 1);
+        assert_eq!(sample.committed_payload()[index], index as u8);
+        assert_eq!(sample.committed_since(index), &[index as u8]);
         let _ = sample.state();
     }
     let hot_path_allocations = ALLOCATIONS.load(Ordering::SeqCst);
     eprintln!("IOX2_HOT_PATH_END");
 
     assert_eq!(hot_path_allocations, 0);
-    writer.finish().unwrap();
+    writer.complete().unwrap();
 }

@@ -23,7 +23,10 @@ pub struct ProgressiveSubscriber<Service: crate::service::Service, UserHeader: D
 impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
     ProgressiveSubscriber<Service, UserHeader>
 {
-    /// Receives a progressive sample offset once.
+    /// Receives an allocation announced while this subscriber was connected.
+    ///
+    /// Progressive services have no history, so samples announced before this
+    /// subscriber connected are not returned.
     pub fn receive(&self) -> Result<Option<ProgressiveSample<Service, UserHeader>>, ReceiveError> {
         self.inner.receive_progressive()
     }

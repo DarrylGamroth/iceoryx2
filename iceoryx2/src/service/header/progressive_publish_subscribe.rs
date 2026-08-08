@@ -5,7 +5,7 @@
 
 use core::mem::{align_of, offset_of, size_of};
 
-use iceoryx2_bb_concurrency::atomic::{AtomicU32, AtomicU64, Ordering};
+use iceoryx2_bb_concurrency::atomic::{AtomicU64, Ordering};
 use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
 
 use crate::identifiers::{UniqueNodeId, UniquePublisherId};
@@ -13,29 +13,40 @@ use crate::identifiers::{UniqueNodeId, UniquePublisherId};
 /// Alignment used to isolate independently accessed progressive sample data.
 pub const PROGRESSIVE_CONTROL_ALIGNMENT: usize = 128;
 
-const STATE_FILLING: u32 = 1;
-const STATE_COMPLETE: u32 = 2;
-const STATE_ABORTED: u32 = 3;
+const STATE_ACTIVE: u64 = 0;
+const STATE_COMPLETE: u64 = 1;
+const STATE_ABORTED: u64 = 2;
+const STATE_MASK: u64 = 0b11;
+const COMMITTED_LEN_SHIFT: u32 = 2;
+
+pub(crate) const MAX_COMMITTED_LEN: u64 = u64::MAX >> COMMITTED_LEN_SHIFT;
 
 /// Subscriber-visible terminal state of a progressive sample.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ProgressiveSampleState {
     /// The publisher may still extend the immutable prefix.
-    Filling,
+    Active,
     /// The publisher finished the sample successfully.
     Complete,
     /// The publisher aborted or dropped the active writer.
     Aborted,
 }
 
+/// One atomically observed progressive control snapshot.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct ProgressiveControlSnapshot {
+    pub(crate) committed_len: u64,
+    pub(crate) state: ProgressiveSampleState,
+}
+
 /// Publisher-written control data occupying exactly one 128-byte region.
 #[derive(Debug)]
 #[repr(C, align(128))]
 pub struct ProgressiveControl {
-    published_len: AtomicU64,
-    state: AtomicU32,
-    change_counter: AtomicU32,
-    reserved: [u8; 112],
+    /// The committed length occupies the high 62 bits and the state the low 2.
+    /// Every subscriber therefore observes both values from one atomic load.
+    snapshot: AtomicU64,
+    reserved: [u8; 120],
 }
 
 unsafe impl ZeroCopySend for ProgressiveControl {}
@@ -43,41 +54,67 @@ unsafe impl ZeroCopySend for ProgressiveControl {}
 impl ProgressiveControl {
     pub(crate) fn new() -> Self {
         Self {
-            published_len: AtomicU64::new(0),
-            state: AtomicU32::new(STATE_FILLING),
-            change_counter: AtomicU32::new(0),
-            reserved: [0; 112],
+            snapshot: AtomicU64::new(Self::encode(0, ProgressiveSampleState::Active)),
+            reserved: [0; 120],
         }
     }
 
     #[inline]
-    pub(crate) fn published_len(&self, ordering: Ordering) -> u64 {
-        self.published_len.load(ordering)
+    const fn encode(committed_len: u64, state: ProgressiveSampleState) -> u64 {
+        let state = match state {
+            ProgressiveSampleState::Active => STATE_ACTIVE,
+            ProgressiveSampleState::Complete => STATE_COMPLETE,
+            ProgressiveSampleState::Aborted => STATE_ABORTED,
+        };
+        (committed_len << COMMITTED_LEN_SHIFT) | state
     }
 
     #[inline]
-    pub(crate) fn publish_len(&self, value: u64) {
-        self.published_len.store(value, Ordering::Release);
-    }
-
-    #[inline]
-    pub(crate) fn state(&self, ordering: Ordering) -> ProgressiveSampleState {
-        match self.state.load(ordering) {
-            STATE_FILLING => ProgressiveSampleState::Filling,
+    fn decode(value: u64) -> ProgressiveControlSnapshot {
+        let state = match value & STATE_MASK {
+            STATE_ACTIVE => ProgressiveSampleState::Active,
             STATE_COMPLETE => ProgressiveSampleState::Complete,
             STATE_ABORTED => ProgressiveSampleState::Aborted,
             value => panic!("invalid progressive sample state {value}"),
+        };
+        ProgressiveControlSnapshot {
+            committed_len: value >> COMMITTED_LEN_SHIFT,
+            state,
         }
+    }
+
+    #[inline]
+    pub(crate) fn snapshot(&self, ordering: Ordering) -> ProgressiveControlSnapshot {
+        Self::decode(self.snapshot.load(ordering))
+    }
+
+    #[inline]
+    pub(crate) fn commit(&self, value: u64) {
+        debug_assert!(value <= MAX_COMMITTED_LEN);
+        self.snapshot.store(
+            Self::encode(value, ProgressiveSampleState::Active),
+            Ordering::Release,
+        );
     }
 
     #[inline]
     pub(crate) fn complete(&self) {
-        self.state.store(STATE_COMPLETE, Ordering::Release);
+        let current = self.snapshot(Ordering::Acquire);
+        debug_assert_eq!(current.state, ProgressiveSampleState::Active);
+        self.snapshot.store(
+            Self::encode(current.committed_len, ProgressiveSampleState::Complete),
+            Ordering::Release,
+        );
     }
 
     #[inline]
     pub(crate) fn abort(&self) {
-        self.state.store(STATE_ABORTED, Ordering::Release);
+        let current = self.snapshot(Ordering::Acquire);
+        debug_assert_eq!(current.state, ProgressiveSampleState::Active);
+        self.snapshot.store(
+            Self::encode(current.committed_len, ProgressiveSampleState::Aborted),
+            Ordering::Release,
+        );
     }
 }
 
@@ -152,5 +189,35 @@ mod tests {
         assert_eq!(size_of::<Header>(), 256);
         assert_eq!(offset_of!(Header, control), 0);
         assert!(offset_of!(Header, node_id) >= 128);
+    }
+
+    #[test]
+    fn committed_length_and_state_share_one_atomic_snapshot() {
+        let control = ProgressiveControl::new();
+        assert_eq!(
+            control.snapshot(Ordering::Acquire),
+            ProgressiveControlSnapshot {
+                committed_len: 0,
+                state: ProgressiveSampleState::Active,
+            }
+        );
+
+        control.commit(73);
+        assert_eq!(
+            control.snapshot(Ordering::Acquire),
+            ProgressiveControlSnapshot {
+                committed_len: 73,
+                state: ProgressiveSampleState::Active,
+            }
+        );
+
+        control.complete();
+        assert_eq!(
+            control.snapshot(Ordering::Acquire),
+            ProgressiveControlSnapshot {
+                committed_len: 73,
+                state: ProgressiveSampleState::Complete,
+            }
+        );
     }
 }

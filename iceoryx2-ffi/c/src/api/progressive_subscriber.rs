@@ -10,23 +10,39 @@ use crate::api::{
 use core::ffi::{c_int, c_void};
 use core::mem::ManuallyDrop;
 use iceoryx2::port::progressive_subscriber::ProgressiveSubscriber;
-use iceoryx2::progressive_sample::ProgressiveSample;
+use iceoryx2::progressive_sample::{ProgressiveSample, ProgressiveSampleSnapshot};
 use iceoryx2::service::header::progressive_publish_subscribe::ProgressiveSampleState;
-use iceoryx2_bb_elementary::static_assert::*;
 use iceoryx2_ffi_macros::iceoryx2_ffi;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum iox2_progressive_sample_state_e {
-    FILLING = 1,
+    ACTIVE = 1,
     COMPLETE = 2,
     ABORTED = 3,
+}
+
+/// One atomically observed committed length and lifecycle state.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct iox2_progressive_sample_snapshot_t {
+    pub committed_len: c_size_t,
+    pub state: iox2_progressive_sample_state_e,
+}
+
+impl From<ProgressiveSampleSnapshot> for iox2_progressive_sample_snapshot_t {
+    fn from(value: ProgressiveSampleSnapshot) -> Self {
+        Self {
+            committed_len: value.committed_len(),
+            state: value.state().into(),
+        }
+    }
 }
 
 impl From<ProgressiveSampleState> for iox2_progressive_sample_state_e {
     fn from(value: ProgressiveSampleState) -> Self {
         match value {
-            ProgressiveSampleState::Filling => Self::FILLING,
+            ProgressiveSampleState::Active => Self::ACTIVE,
             ProgressiveSampleState::Complete => Self::COMPLETE,
             ProgressiveSampleState::Aborted => Self::ABORTED,
         }
@@ -254,31 +270,88 @@ pub unsafe extern "C" fn iox2_progressive_subscriber_has_samples(
     }
 }
 
-/// Returns one acquire-bounded immutable payload prefix snapshot.
+/// Acquire-loads the committed length and lifecycle state as one atomic snapshot.
+///
+/// # Safety
+///
+/// `sample_handle` must be valid and `snapshot_ptr` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iox2_progressive_sample_snapshot(
+    sample_handle: iox2_progressive_sample_h_ref,
+    snapshot_ptr: *mut iox2_progressive_sample_snapshot_t,
+) {
+    sample_handle.assert_non_null();
+    debug_assert!(!snapshot_ptr.is_null());
+    unsafe {
+        let sample = &*sample_handle.as_type();
+        let snapshot = match sample.service_type {
+            iox2_service_type_e::IPC => sample.value.as_ref().ipc.snapshot(),
+            iox2_service_type_e::LOCAL => sample.value.as_ref().local.snapshot(),
+        };
+        *snapshot_ptr = snapshot.into();
+    }
+}
+
+/// Returns one snapshot while accounting for abrupt publisher death.
+/// This may perform operating-system calls when the shared state is still active.
+///
+/// # Safety
+///
+/// `sample_handle` must be valid and `snapshot_ptr` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iox2_progressive_sample_snapshot_with_publisher_liveness(
+    sample_handle: iox2_progressive_sample_h_ref,
+    snapshot_ptr: *mut iox2_progressive_sample_snapshot_t,
+) -> c_int {
+    sample_handle.assert_non_null();
+    debug_assert!(!snapshot_ptr.is_null());
+    unsafe {
+        let sample = &*sample_handle.as_type();
+        let result = match sample.service_type {
+            iox2_service_type_e::IPC => {
+                sample.value.as_ref().ipc.snapshot_with_publisher_liveness()
+            }
+            iox2_service_type_e::LOCAL => sample
+                .value
+                .as_ref()
+                .local
+                .snapshot_with_publisher_liveness(),
+        };
+        match result {
+            Ok(snapshot) => {
+                *snapshot_ptr = snapshot.into();
+                IOX2_OK
+            }
+            Err(error) => error.into_c_int(),
+        }
+    }
+}
+
+/// Returns one acquire-bounded immutable committed payload prefix.
 ///
 /// The returned pointer is valid only while the sample handle remains alive. The publisher may
 /// extend the prefix, but never mutates bytes already included in this snapshot.
 ///
 /// # Safety
 ///
-/// `sample_handle` must be valid. `payload_ptr` and `published_len` must be writable.
+/// `sample_handle` must be valid. `payload_ptr` and `committed_len` must be writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn iox2_progressive_sample_payload(
+pub unsafe extern "C" fn iox2_progressive_sample_committed_payload(
     sample_handle: iox2_progressive_sample_h_ref,
     payload_ptr: *mut *const u8,
-    published_len: *mut c_size_t,
+    committed_len: *mut c_size_t,
 ) {
     sample_handle.assert_non_null();
     debug_assert!(!payload_ptr.is_null());
-    debug_assert!(!published_len.is_null());
+    debug_assert!(!committed_len.is_null());
     unsafe {
         let sample = &*sample_handle.as_type();
         let payload = match sample.service_type {
-            iox2_service_type_e::IPC => sample.value.as_ref().ipc.payload(),
-            iox2_service_type_e::LOCAL => sample.value.as_ref().local.payload(),
+            iox2_service_type_e::IPC => sample.value.as_ref().ipc.committed_payload(),
+            iox2_service_type_e::LOCAL => sample.value.as_ref().local.committed_payload(),
         };
         *payload_ptr = payload.as_ptr();
-        *published_len = payload.len();
+        *committed_len = payload.len();
     }
 }
 
@@ -345,7 +418,7 @@ pub unsafe extern "C" fn iox2_progressive_sample_state(
 }
 
 /// Returns the sample state while accounting for abrupt publisher death.
-/// This may perform operating-system calls when the shared state is still filling.
+/// This may perform operating-system calls when the shared state is still active.
 ///
 /// # Safety
 ///

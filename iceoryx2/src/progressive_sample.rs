@@ -14,7 +14,30 @@ use crate::port::details::chunk_details::ChunkDetails;
 use crate::port::subscriber::SubscriberSharedState;
 use crate::service::header::progressive_publish_subscribe::{Header, ProgressiveSampleState};
 
+/// An atomically observed committed length and lifecycle state.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct ProgressiveSampleSnapshot {
+    committed_len: usize,
+    state: ProgressiveSampleState,
+}
+
+impl ProgressiveSampleSnapshot {
+    /// Returns the immutable committed prefix length in bytes.
+    pub fn committed_len(&self) -> usize {
+        self.committed_len
+    }
+
+    /// Returns the lifecycle state observed with the committed length.
+    pub fn state(&self) -> ProgressiveSampleState {
+        self.state
+    }
+}
+
 /// A subscriber's whole-allocation lease for one progressive sample.
+///
+/// The lease grants shared immutable read access only to the prefix reported by
+/// [`ProgressiveSample::snapshot`]. Retaining the lease prevents allocation
+/// reuse even after the writer completes or aborts.
 ///
 /// A payload borrow cannot outlive its sample lease:
 ///
@@ -25,7 +48,7 @@ use crate::service::header::progressive_publish_subscribe::{Header, ProgressiveS
 /// fn payload_cannot_outlive_sample<'a>(
 ///     sample: ProgressiveSample<ipc::Service, ()>,
 /// ) -> &'a [u8] {
-///     sample.payload()
+///     sample.committed_payload()
 /// }
 /// ```
 #[derive(Debug)]
@@ -66,58 +89,102 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
         unsafe { &*self.header }.control()
     }
 
-    /// Returns the currently published immutable prefix.
-    ///
-    /// This constructs a slice of exactly the acquire-loaded length; it never
-    /// materializes a full-capacity slice.
-    pub fn payload(&self) -> &[u8] {
-        let published_len = self.published_len();
+    /// Atomically acquire-loads the committed length and lifecycle state.
+    pub fn snapshot(&self) -> ProgressiveSampleSnapshot {
+        let snapshot = self.control().snapshot(Ordering::Acquire);
+        let committed_len = usize::try_from(snapshot.committed_len)
+            .expect("committed length is unsupported by this target");
         assert!(
-            published_len <= self.capacity,
-            "corrupt progressive watermark"
+            committed_len <= self.capacity,
+            "corrupt progressive committed length"
         );
-        unsafe { core::slice::from_raw_parts(self.payload, published_len) }
+        ProgressiveSampleSnapshot {
+            committed_len,
+            state: snapshot.state,
+        }
     }
 
-    /// Acquire-loads the current published byte length.
-    pub fn published_len(&self) -> usize {
-        usize::try_from(self.control().published_len(Ordering::Acquire))
-            .expect("published length is unsupported by this target")
-    }
-
-    /// Acquire-loads the current terminal state.
-    pub fn state(&self) -> ProgressiveSampleState {
-        self.control().state(Ordering::Acquire)
-    }
-
-    /// Returns the terminal state while also accounting for abrupt publisher
-    /// process death.
+    /// Returns the currently committed immutable prefix.
     ///
-    /// Unlike [`Self::state`], this is not a hot-path operation: when the
-    /// shared state is still [`ProgressiveSampleState::Filling`], it queries
+    /// This constructs a slice of exactly the atomically observed length; it never
+    /// materializes a full-capacity slice.
+    pub fn committed_payload(&self) -> &[u8] {
+        let snapshot = self.snapshot();
+        unsafe { core::slice::from_raw_parts(self.payload, snapshot.committed_len) }
+    }
+
+    /// Returns bytes committed since a subscriber-local processed offset.
+    ///
+    /// Producer commit granularity and consumer processing granularity are
+    /// independent. The offset is local cursor state and is never written to
+    /// shared memory.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `processed_len` is greater than the atomically observed
+    /// committed length.
+    pub fn committed_since(&self, processed_len: usize) -> &[u8] {
+        let snapshot = self.snapshot();
+        assert!(
+            processed_len <= snapshot.committed_len,
+            "processed length exceeds committed length"
+        );
+        unsafe {
+            core::slice::from_raw_parts(
+                self.payload.add(processed_len),
+                snapshot.committed_len - processed_len,
+            )
+        }
+    }
+
+    /// Acquire-loads the current committed byte length.
+    pub fn committed_len(&self) -> usize {
+        self.snapshot().committed_len
+    }
+
+    /// Acquire-loads the current lifecycle state.
+    pub fn state(&self) -> ProgressiveSampleState {
+        self.snapshot().state
+    }
+
+    /// Returns a snapshot while also accounting for abrupt publisher death.
+    ///
+    /// Unlike [`Self::snapshot`], this is not a hot-path operation: when the
+    /// shared state is still [`ProgressiveSampleState::Active`], it queries
     /// the node-monitoring backend and may perform operating-system calls. A
     /// dead or already-cleaned origin node is reported as `Aborted` without
     /// mutating the shared header. Inaccessible or undefined node state is
-    /// handled conservatively as `Filling`.
-    pub fn state_with_publisher_liveness(
+    /// handled conservatively as `Active`.
+    pub fn snapshot_with_publisher_liveness(
         &self,
-    ) -> Result<ProgressiveSampleState, crate::node::NodeListFailure> {
+    ) -> Result<ProgressiveSampleSnapshot, crate::node::NodeListFailure> {
         use crate::node::NodeState;
 
-        let state = self.state();
-        if state != ProgressiveSampleState::Filling {
-            return Ok(state);
+        let mut snapshot = self.snapshot();
+        if snapshot.state != ProgressiveSampleState::Active {
+            return Ok(snapshot);
         }
 
         let node_id = unsafe { &*self.header }.node_id();
         let shared_state = self.subscriber_shared_state.lock();
         let config = shared_state.receiver.service_state.shared_node().config();
-        Ok(match NodeState::<Service>::new(&node_id, config)? {
+        snapshot.state = match NodeState::<Service>::new(&node_id, config)? {
             None | Some(NodeState::Dead(_)) => ProgressiveSampleState::Aborted,
             Some(NodeState::Alive(_))
             | Some(NodeState::Inaccessible(_))
-            | Some(NodeState::Undefined(_)) => ProgressiveSampleState::Filling,
-        })
+            | Some(NodeState::Undefined(_)) => ProgressiveSampleState::Active,
+        };
+        Ok(snapshot)
+    }
+
+    /// Returns the lifecycle state while accounting for abrupt publisher death.
+    ///
+    /// This is the state-only convenience form of
+    /// [`Self::snapshot_with_publisher_liveness`].
+    pub fn state_with_publisher_liveness(
+        &self,
+    ) -> Result<ProgressiveSampleState, crate::node::NodeListFailure> {
+        Ok(self.snapshot_with_publisher_liveness()?.state)
     }
 
     /// Returns the immutable application user header.

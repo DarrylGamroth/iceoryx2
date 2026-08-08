@@ -15,16 +15,16 @@ use crate::port::SendError;
 use crate::port::publisher::PublisherSharedState;
 use crate::service::header::progressive_publish_subscribe::{Header, ProgressiveSampleState};
 
-/// A progressive watermark or writer operation failed.
+/// A progressive commit or writer operation failed.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ProgressiveWriteError {
-    /// The requested watermark is smaller than the current watermark.
-    PublishedLengthRegressed,
-    /// The requested watermark exceeds the allocation capacity.
-    PublishedLengthExceedsCapacity,
+    /// The requested committed length is smaller than the current committed length.
+    CommittedLengthRegressed,
+    /// The requested committed length exceeds the allocation capacity.
+    CommittedLengthExceedsCapacity,
     /// The sample is already complete or aborted.
     SampleIsTerminal,
-    /// The input does not fit in the unpublished suffix.
+    /// The input does not fit in the uncommitted suffix.
     InsufficientCapacity,
 }
 
@@ -36,9 +36,9 @@ impl core::fmt::Display for ProgressiveWriteError {
 
 impl core::error::Error for ProgressiveWriteError {}
 
-/// A private, unsent progressive publisher loan.
+/// A private, unannounced progressive publisher loan.
 ///
-/// The complete allocation is private in this state. `send()` transfers the
+/// The complete allocation is private in this state. `announce()` transfers the
 /// existing publisher loan into [`ProgressiveSampleMut`] without returning or
 /// reacquiring it.
 #[derive(Debug)]
@@ -100,7 +100,7 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
         unsafe { &*self.user_header }
     }
 
-    /// Returns a mutable reference to the application user header before send.
+    /// Returns a mutable reference to the application user header before announcement.
     pub fn user_header_mut(&mut self) -> &mut UserHeader {
         unsafe { &mut *self.user_header }
     }
@@ -110,19 +110,23 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
     /// # Safety
     ///
     /// The caller must ensure there is only one writer, all writes remain in
-    /// bounds, published bytes are never modified again, and the external
-    /// writer stops before finish, abort, drop, or deallocation.
+    /// bounds, committed bytes are never modified again, and the external
+    /// writer stops before complete, abort, drop, or deallocation.
     pub unsafe fn payload_mut_ptr(&self) -> *mut u8 {
         self.payload
     }
 
-    /// Delivers the allocation offset once to every currently connected
-    /// subscriber and transfers this exact publisher loan to an active writer.
-    pub fn send(mut self) -> Result<ProgressiveSampleMut<Service, UserHeader>, SendError> {
+    /// Announces the allocation once to every currently connected subscriber
+    /// and transfers this exact publisher loan to an active writer.
+    ///
+    /// Subscribers connecting after this call do not receive the active sample.
+    /// Queue admission and configured backpressure are evaluated by this call;
+    /// later commits update shared state without enqueuing another offset.
+    pub fn announce(mut self) -> Result<ProgressiveSampleMut<Service, UserHeader>, SendError> {
         let result = self
             .publisher_shared_state
             .lock()
-            .send_progressive_sample(self.offset_to_chunk, self.sample_size);
+            .announce_progressive_sample(self.offset_to_chunk, self.sample_size);
 
         match result {
             Ok(_) => {
@@ -148,9 +152,9 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
     }
 }
 
-/// Active progressive writer. It can mutate only the unpublished suffix.
+/// Active progressive writer. It can mutate only the uncommitted suffix.
 ///
-/// The sent typestate intentionally has no whole-payload mutable API, mutable
+/// The announced typestate intentionally has no whole-payload mutable API, mutable
 /// user-header API, or `DerefMut` implementation:
 ///
 /// ```compile_fail
@@ -210,7 +214,7 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend> Drop
     fn drop(&mut self) {
         if self.owns_loan {
             let control = unsafe { &*self.header }.control();
-            if control.state(Ordering::Acquire) == ProgressiveSampleState::Filling {
+            if control.snapshot(Ordering::Acquire).state == ProgressiveSampleState::Active {
                 control.abort();
             }
             self.publisher_shared_state
@@ -231,11 +235,17 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
         unsafe { &*self.header }.control()
     }
 
-    fn validate_active(&self) -> Result<(), ProgressiveWriteError> {
-        if self.control().state(Ordering::Acquire) != ProgressiveSampleState::Filling {
+    fn validate_active(
+        &self,
+    ) -> Result<
+        crate::service::header::progressive_publish_subscribe::ProgressiveControlSnapshot,
+        ProgressiveWriteError,
+    > {
+        let snapshot = self.control().snapshot(Ordering::Acquire);
+        if snapshot.state != ProgressiveSampleState::Active {
             return Err(ProgressiveWriteError::SampleIsTerminal);
         }
-        Ok(())
+        Ok(snapshot)
     }
 
     /// Returns the immutable application user header.
@@ -248,70 +258,68 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
         self.capacity
     }
 
-    /// Returns the current published prefix length.
-    pub fn published_len(&self) -> usize {
-        usize::try_from(self.control().published_len(Ordering::Acquire))
-            .expect("published length is unsupported by this target")
+    /// Returns the current committed prefix length.
+    pub fn committed_len(&self) -> usize {
+        usize::try_from(self.control().snapshot(Ordering::Acquire).committed_len)
+            .expect("committed length is unsupported by this target")
     }
 
-    /// Returns a mutable view of only the unpublished suffix.
-    pub fn unpublished_mut(&mut self) -> Result<&mut [MaybeUninit<u8>], ProgressiveWriteError> {
-        self.validate_active()?;
-        let published_len = self.published_len();
+    /// Returns a mutable view of only the uncommitted suffix.
+    pub fn uncommitted_mut(&mut self) -> Result<&mut [MaybeUninit<u8>], ProgressiveWriteError> {
+        let committed_len = usize::try_from(self.validate_active()?.committed_len)
+            .expect("committed length is unsupported by this target");
         let suffix_len = self
             .capacity
-            .checked_sub(published_len)
-            .ok_or(ProgressiveWriteError::PublishedLengthExceedsCapacity)?;
-        let suffix_ptr = unsafe { self.payload.add(published_len) };
+            .checked_sub(committed_len)
+            .ok_or(ProgressiveWriteError::CommittedLengthExceedsCapacity)?;
+        let suffix_ptr = unsafe { self.payload.add(committed_len) };
         Ok(unsafe { core::slice::from_raw_parts_mut(suffix_ptr.cast(), suffix_len) })
     }
 
-    /// Copies bytes into the current unpublished suffix and release-publishes
+    /// Copies bytes into the current uncommitted suffix and release-commits
     /// the enlarged immutable prefix.
     pub fn write_from_slice(&mut self, bytes: &[u8]) -> Result<(), ProgressiveWriteError> {
-        let old_len = self.published_len();
+        let old_len = self.committed_len();
         let new_len = old_len
             .checked_add(bytes.len())
-            .ok_or(ProgressiveWriteError::PublishedLengthExceedsCapacity)?;
+            .ok_or(ProgressiveWriteError::CommittedLengthExceedsCapacity)?;
         if new_len > self.capacity {
             return Err(ProgressiveWriteError::InsufficientCapacity);
         }
-        let suffix = self.unpublished_mut()?;
+        let suffix = self.uncommitted_mut()?;
         for (dst, src) in suffix[..bytes.len()].iter_mut().zip(bytes) {
             dst.write(*src);
         }
-        self.control().publish_len(new_len as u64);
+        self.control().commit(new_len as u64);
         Ok(())
     }
 
-    /// Advances the contiguous initialized byte watermark.
+    /// Commits the contiguous initialized byte prefix through `new_len`.
     ///
     /// # Safety
     ///
     /// The caller guarantees that every byte below `new_len` is initialized
     /// and visible to CPU readers and that no byte below it will be modified
     /// again. This does not establish external DMA cache coherency.
-    pub unsafe fn set_published_len(
-        &mut self,
-        new_len: usize,
-    ) -> Result<(), ProgressiveWriteError> {
-        self.validate_active()?;
-        let old_len = self.published_len();
+    pub unsafe fn commit_until(&mut self, new_len: usize) -> Result<(), ProgressiveWriteError> {
+        let old_len = usize::try_from(self.validate_active()?.committed_len)
+            .expect("committed length is unsupported by this target");
         if new_len < old_len {
-            return Err(ProgressiveWriteError::PublishedLengthRegressed);
+            return Err(ProgressiveWriteError::CommittedLengthRegressed);
         }
         if new_len > self.capacity {
-            return Err(ProgressiveWriteError::PublishedLengthExceedsCapacity);
+            return Err(ProgressiveWriteError::CommittedLengthExceedsCapacity);
         }
-        self.control().publish_len(new_len as u64);
+        self.control().commit(new_len as u64);
         Ok(())
     }
 
-    /// Marks the sample complete and releases the publisher loan exactly once.
-    pub fn finish(mut self) -> Result<(), ProgressiveWriteError> {
-        self.validate_active()?;
-        if self.published_len() > self.capacity {
-            return Err(ProgressiveWriteError::PublishedLengthExceedsCapacity);
+    /// Atomically marks the current committed length complete and releases the
+    /// publisher loan exactly once.
+    pub fn complete(mut self) -> Result<(), ProgressiveWriteError> {
+        let snapshot = self.validate_active()?;
+        if snapshot.committed_len > self.capacity as u64 {
+            return Err(ProgressiveWriteError::CommittedLengthExceedsCapacity);
         }
         self.control().complete();
         self.release_loan();
@@ -356,7 +364,7 @@ mod tests {
     }
 
     // The test models the protocol's monotonic capability split: the sole
-    // writer touches only bytes above the release-published watermark and the
+    // writer touches only bytes above the release-committed boundary and the
     // reader constructs only acquire-bounded immutable prefixes.
     unsafe impl Sync for AliasingModel {}
 
@@ -372,10 +380,10 @@ mod tests {
             scope.spawn(move || {
                 let payload = writer_storage.payload.get().cast::<u8>();
                 for index in 0..CAPACITY {
-                    // Construct only the one-byte unpublished region directly
+                    // Construct only the one-byte uncommitted region directly
                     // from the stored raw pointer, never a complete slice.
                     unsafe { payload.add(index).write(index as u8) };
-                    writer_storage.control.publish_len((index + 1) as u64);
+                    writer_storage.control.commit((index + 1) as u64);
                 }
                 writer_storage.control.complete();
             });
@@ -385,22 +393,22 @@ mod tests {
                 let payload = reader_storage.payload.get().cast::<u8>();
                 let mut checked = 0;
                 while checked < CAPACITY {
-                    let published =
-                        reader_storage.control.published_len(Ordering::Acquire) as usize;
-                    let prefix = unsafe { core::slice::from_raw_parts(payload, published) };
+                    let snapshot = reader_storage.control.snapshot(Ordering::Acquire);
+                    let committed = snapshot.committed_len as usize;
+                    let prefix = unsafe { core::slice::from_raw_parts(payload, committed) };
                     for (index, value) in prefix[checked..].iter().enumerate() {
                         assert_eq!(*value, (checked + index) as u8);
                     }
-                    checked = published;
+                    checked = committed;
                     core::hint::spin_loop();
                 }
-                while reader_storage.control.state(Ordering::Acquire)
-                    == ProgressiveSampleState::Filling
+                while reader_storage.control.snapshot(Ordering::Acquire).state
+                    == ProgressiveSampleState::Active
                 {
                     core::hint::spin_loop();
                 }
                 assert_eq!(
-                    reader_storage.control.state(Ordering::Acquire),
+                    reader_storage.control.snapshot(Ordering::Acquire).state,
                     ProgressiveSampleState::Complete
                 );
             });

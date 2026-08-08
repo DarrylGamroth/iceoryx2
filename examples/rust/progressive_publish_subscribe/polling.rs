@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         rows: ROWS as u32,
         row_bytes: ROW_BYTES as u32,
     };
-    let writer = loan.send()?;
+    let writer = loan.announce()?;
     let fast_sample = fast_subscriber
         .receive()?
         .expect("fast subscriber missed frame");
@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
                 writer.write_from_slice(&row).unwrap();
                 std::thread::sleep(Duration::from_millis(2));
             }
-            writer.finish().unwrap();
+            writer.complete().unwrap();
         });
 
         let fast_times = publication_times.clone();
@@ -79,10 +79,9 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
             let mut consumed_rows = 0;
             let mut latency_ns = 0u128;
             while consumed_rows < ROWS {
-                let payload = fast_sample.payload();
-                while consumed_rows < payload.len() / ROW_BYTES {
-                    let start = consumed_rows * ROW_BYTES;
-                    validate_row(consumed_rows, &payload[start..start + ROW_BYTES]);
+                let available = fast_sample.committed_since(consumed_rows * ROW_BYTES);
+                for row in available.chunks_exact(ROW_BYTES) {
+                    validate_row(consumed_rows, row);
                     let published = fast_times[consumed_rows].load(Ordering::Relaxed);
                     latency_ns += epoch.elapsed().as_nanos().saturating_sub(published as u128);
                     consumed_rows += 1;
@@ -97,10 +96,9 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
             let mut consumed_rows = 0;
             let mut latency_ns = 0u128;
             while consumed_rows < ROWS {
-                let payload = slow_sample.payload();
-                while consumed_rows < payload.len() / ROW_BYTES {
-                    let start = consumed_rows * ROW_BYTES;
-                    validate_row(consumed_rows, &payload[start..start + ROW_BYTES]);
+                let available = slow_sample.committed_since(consumed_rows * ROW_BYTES);
+                for row in available.chunks_exact(ROW_BYTES) {
+                    validate_row(consumed_rows, row);
                     let published = publication_times[consumed_rows].load(Ordering::Relaxed);
                     latency_ns += epoch.elapsed().as_nanos().saturating_sub(published as u128);
                     consumed_rows += 1;

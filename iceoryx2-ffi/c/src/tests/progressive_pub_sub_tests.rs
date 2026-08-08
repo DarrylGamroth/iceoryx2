@@ -193,7 +193,7 @@ mod progressive_pub_sub {
     }
 
     #[test]
-    fn progressive_c_ffi_preserves_prefix_and_ownership<S: Service + ServiceTypeMapping>() {
+    fn progressive_c_ffi_preserves_prefix_and_access_authority<S: Service + ServiceTypeMapping>() {
         unsafe {
             let node = create_node::<S>("progressive-c-ffi");
             let factory = create_progressive_service::<S>(&node);
@@ -237,7 +237,7 @@ mod progressive_pub_sub {
 
             let mut writer = core::ptr::null_mut();
             assert_that!(
-                iox2_progressive_sample_mut_uninit_send(
+                iox2_progressive_sample_mut_uninit_announce(
                     private_loan,
                     core::ptr::null_mut(),
                     &mut writer,
@@ -245,14 +245,14 @@ mod progressive_pub_sub {
                 eq(IOX2_OK)
             );
             assert_that!(
-                iox2_progressive_sample_mut_set_published_len(&writer, 4),
+                iox2_progressive_sample_mut_commit_until(&writer, 4),
                 eq(IOX2_OK)
             );
             assert_that!(
                 iox2_progressive_sample_mut_payload_capacity(&writer),
                 eq(32)
             );
-            assert_that!(iox2_progressive_sample_mut_published_len(&writer), eq(4));
+            assert_that!(iox2_progressive_sample_mut_committed_len(&writer), eq(4));
             assert_that!(
                 *(iox2_progressive_sample_mut_user_header(&writer) as *const u64),
                 eq(0xfeed_beef)
@@ -265,11 +265,11 @@ mod progressive_pub_sub {
 
             let sample = receive(&subscriber);
             let mut prefix = core::ptr::null();
-            let mut published_len = 0;
-            iox2_progressive_sample_payload(&sample, &mut prefix, &mut published_len);
-            assert_that!(published_len, eq(4));
+            let mut committed_len = 0;
+            iox2_progressive_sample_committed_payload(&sample, &mut prefix, &mut committed_len);
+            assert_that!(committed_len, eq(4));
             assert_that!(
-                core::slice::from_raw_parts(prefix, published_len),
+                core::slice::from_raw_parts(prefix, committed_len),
                 eq(&[1, 2, 3, 4])
             );
             assert_that!(iox2_progressive_sample_payload_capacity(&sample), eq(32));
@@ -279,43 +279,58 @@ mod progressive_pub_sub {
             );
             assert_that!(
                 iox2_progressive_sample_state(&sample),
-                eq(iox2_progressive_sample_state_e::FILLING)
+                eq(iox2_progressive_sample_state_e::ACTIVE)
             );
+            let mut snapshot = iox2_progressive_sample_snapshot_t {
+                committed_len: 0,
+                state: iox2_progressive_sample_state_e::ABORTED,
+            };
+            iox2_progressive_sample_snapshot(&sample, &mut snapshot);
+            assert_that!(snapshot.committed_len, eq(4));
+            assert_that!(snapshot.state, eq(iox2_progressive_sample_state_e::ACTIVE));
             let mut liveness_state = iox2_progressive_sample_state_e::ABORTED;
             assert_that!(
                 iox2_progressive_sample_state_with_publisher_liveness(&sample, &mut liveness_state,),
                 eq(IOX2_OK)
             );
-            assert_that!(liveness_state, eq(iox2_progressive_sample_state_e::FILLING));
+            assert_that!(liveness_state, eq(iox2_progressive_sample_state_e::ACTIVE));
+            assert_that!(
+                iox2_progressive_sample_snapshot_with_publisher_liveness(&sample, &mut snapshot),
+                eq(IOX2_OK)
+            );
+            assert_that!(snapshot.committed_len, eq(4));
+            assert_that!(snapshot.state, eq(iox2_progressive_sample_state_e::ACTIVE));
 
             assert_that!(
-                iox2_progressive_sample_mut_set_published_len(&writer, 3),
-                eq(iox2_progressive_write_error_e::PUBLISHED_LENGTH_REGRESSED as i32)
+                iox2_progressive_sample_mut_commit_until(&writer, 3),
+                eq(iox2_progressive_write_error_e::COMMITTED_LENGTH_REGRESSED as i32)
             );
             core::ptr::copy_nonoverlapping([5_u8, 6].as_ptr(), payload.cast::<u8>().add(4), 2);
             assert_that!(
-                iox2_progressive_sample_mut_set_published_len(&writer, 6),
+                iox2_progressive_sample_mut_commit_until(&writer, 6),
                 eq(IOX2_OK)
             );
-            iox2_progressive_sample_payload(&sample, &mut prefix, &mut published_len);
-            assert_that!(published_len, eq(6));
+            iox2_progressive_sample_committed_payload(&sample, &mut prefix, &mut committed_len);
+            assert_that!(committed_len, eq(6));
             assert_that!(
-                core::slice::from_raw_parts(prefix, published_len),
+                core::slice::from_raw_parts(prefix, committed_len),
                 eq(&[1, 2, 3, 4, 5, 6])
             );
             assert_that!(
                 iox2_progressive_sample_mut_write_from_slice(&writer, [7, 8].as_ptr(), 2),
                 eq(IOX2_OK)
             );
-            iox2_progressive_sample_payload(&sample, &mut prefix, &mut published_len);
-            assert_that!(published_len, eq(8));
+            iox2_progressive_sample_committed_payload(&sample, &mut prefix, &mut committed_len);
+            assert_that!(committed_len, eq(8));
             assert_that!(
-                core::slice::from_raw_parts(prefix, published_len),
+                core::slice::from_raw_parts(prefix, committed_len),
                 eq(&[1, 2, 3, 4, 5, 6, 7, 8])
             );
-            assert_that!(iox2_progressive_sample_mut_finish(writer), eq(IOX2_OK));
+            assert_that!(iox2_progressive_sample_mut_complete(writer), eq(IOX2_OK));
+            iox2_progressive_sample_snapshot(&sample, &mut snapshot);
+            assert_that!(snapshot.committed_len, eq(8));
             assert_that!(
-                iox2_progressive_sample_state(&sample),
+                snapshot.state,
                 eq(iox2_progressive_sample_state_e::COMPLETE)
             );
             iox2_progressive_sample_drop(sample);
@@ -333,7 +348,7 @@ mod progressive_pub_sub {
                 );
                 let mut active = core::ptr::null_mut();
                 assert_that!(
-                    iox2_progressive_sample_mut_uninit_send(
+                    iox2_progressive_sample_mut_uninit_announce(
                         loan,
                         core::ptr::null_mut(),
                         &mut active,

@@ -16,7 +16,6 @@ use core::mem::ManuallyDrop;
 use iceoryx2::service::port_factory::publish_subscribe::{
     ProgressivePortFactory, ProgressivePortFactoryPublisher, ProgressivePortFactorySubscriber,
 };
-use iceoryx2_bb_elementary::static_assert::*;
 use iceoryx2_ffi_macros::iceoryx2_ffi;
 
 pub(super) union ProgressivePortFactoryUnion {

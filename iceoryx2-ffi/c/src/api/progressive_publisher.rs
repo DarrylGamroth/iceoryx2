@@ -13,15 +13,14 @@ use iceoryx2::port::progressive_publisher::ProgressivePublisher;
 use iceoryx2::progressive_sample_mut::{
     ProgressiveSampleMut, ProgressiveSampleMutUninit, ProgressiveWriteError,
 };
-use iceoryx2_bb_elementary::static_assert::*;
 use iceoryx2_bb_elementary_traits::AsCStr;
 use iceoryx2_ffi_macros::{CStrRepr, iceoryx2_ffi};
 
 #[repr(C)]
 #[derive(Copy, Clone, CStrRepr)]
 pub enum iox2_progressive_write_error_e {
-    PUBLISHED_LENGTH_REGRESSED = IOX2_OK as isize + 1,
-    PUBLISHED_LENGTH_EXCEEDS_CAPACITY,
+    COMMITTED_LENGTH_REGRESSED = IOX2_OK as isize + 1,
+    COMMITTED_LENGTH_EXCEEDS_CAPACITY,
     SAMPLE_IS_TERMINAL,
     INSUFFICIENT_CAPACITY,
 }
@@ -29,11 +28,11 @@ pub enum iox2_progressive_write_error_e {
 impl IntoCInt for ProgressiveWriteError {
     fn into_c_int(self) -> c_int {
         (match self {
-            ProgressiveWriteError::PublishedLengthRegressed => {
-                iox2_progressive_write_error_e::PUBLISHED_LENGTH_REGRESSED
+            ProgressiveWriteError::CommittedLengthRegressed => {
+                iox2_progressive_write_error_e::COMMITTED_LENGTH_REGRESSED
             }
-            ProgressiveWriteError::PublishedLengthExceedsCapacity => {
-                iox2_progressive_write_error_e::PUBLISHED_LENGTH_EXCEEDS_CAPACITY
+            ProgressiveWriteError::CommittedLengthExceedsCapacity => {
+                iox2_progressive_write_error_e::COMMITTED_LENGTH_EXCEEDS_CAPACITY
             }
             ProgressiveWriteError::SampleIsTerminal => {
                 iox2_progressive_write_error_e::SAMPLE_IS_TERMINAL
@@ -308,14 +307,14 @@ pub unsafe extern "C" fn iox2_progressive_publisher_loan_slice_uninit(
 
 /// Returns the mutable payload pointer and byte capacity while the loan is private.
 ///
-/// The caller may retain the pointer after `send` for use by the single external writer while
+/// The caller may retain the pointer after `announce` for use by the single external writer while
 /// the returned active-writer handle remains alive. The external writer must stop before
-/// `finish`, `abort`, active-writer drop, private-loan drop, or deallocation.
+/// `complete`, `abort`, active-writer drop, private-loan drop, or deallocation.
 ///
 /// # Safety
 ///
 /// `sample_handle` and `payload_ptr` must be valid. If non-null, `capacity` must be writable.
-/// All writes must remain in bounds, and bytes below a successfully published watermark must
+/// All writes must remain in bounds, and bytes below a successfully committed boundary must
 /// never be modified again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iox2_progressive_sample_mut_uninit_payload_mut(
@@ -368,7 +367,7 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_uninit_user_header_mut(
     }
 }
 
-/// Sends the offset once and transfers the exact publisher loan into an active writer handle.
+/// Announces the offset once and transfers the exact publisher loan into an active writer handle.
 /// The private-loan handle is consumed even when delivery fails.
 ///
 /// # Safety
@@ -376,7 +375,7 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_uninit_user_header_mut(
 /// `sample_handle` must be a valid owning handle and is consumed. `writer_handle_ptr` must
 /// be writable. `writer_struct_ptr` must be null or point to uninitialized storage.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn iox2_progressive_sample_mut_uninit_send(
+pub unsafe extern "C" fn iox2_progressive_sample_mut_uninit_announce(
     sample_handle: iox2_progressive_sample_mut_uninit_h,
     writer_struct_ptr: *mut iox2_progressive_sample_mut_t,
     writer_handle_ptr: *mut iox2_progressive_sample_mut_h,
@@ -394,10 +393,10 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_uninit_send(
 
         let result = match service_type {
             iox2_service_type_e::IPC => ManuallyDrop::into_inner(sample.ipc)
-                .send()
+                .announce()
                 .map(ProgressiveSampleMutUnion::new_ipc),
             iox2_service_type_e::LOCAL => ManuallyDrop::into_inner(sample.local)
-                .send()
+                .announce()
                 .map(ProgressiveSampleMutUnion::new_local),
         };
         match result {
@@ -457,26 +456,26 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_payload_capacity(
     }
 }
 
-/// Acquire-loads the active writer's current published length.
+/// Acquire-loads the active writer's current committed length.
 ///
 /// # Safety
 ///
 /// `writer_handle` must be a valid non-owning active-writer handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn iox2_progressive_sample_mut_published_len(
+pub unsafe extern "C" fn iox2_progressive_sample_mut_committed_len(
     writer_handle: iox2_progressive_sample_mut_h_ref,
 ) -> c_size_t {
     writer_handle.assert_non_null();
     unsafe {
         let writer = &*writer_handle.as_type();
         match writer.service_type {
-            iox2_service_type_e::IPC => writer.value.as_ref().ipc.published_len(),
-            iox2_service_type_e::LOCAL => writer.value.as_ref().local.published_len(),
+            iox2_service_type_e::IPC => writer.value.as_ref().ipc.committed_len(),
+            iox2_service_type_e::LOCAL => writer.value.as_ref().local.committed_len(),
         }
     }
 }
 
-/// Returns the immutable user header after send.
+/// Returns the immutable user header after announcement.
 ///
 /// # Safety
 ///
@@ -500,7 +499,7 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_user_header(
     }
 }
 
-/// Copies bytes into the unpublished suffix and release-publishes the enlarged prefix.
+/// Copies bytes into the uncommitted suffix and release-commits the enlarged prefix.
 ///
 /// # Safety
 ///
@@ -529,7 +528,7 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_write_from_slice(
     }
 }
 
-/// Release-publishes a new contiguous byte watermark for externally initialized data.
+/// Release-commits a new contiguous byte boundary for externally initialized data.
 ///
 /// # Safety
 ///
@@ -537,7 +536,7 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_write_from_slice(
 /// visible to CPU readers and will never be modified again. This function does not establish
 /// DMA cache coherency.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn iox2_progressive_sample_mut_set_published_len(
+pub unsafe extern "C" fn iox2_progressive_sample_mut_commit_until(
     writer_handle: iox2_progressive_sample_mut_h_ref,
     new_len: c_size_t,
 ) -> c_int {
@@ -545,24 +544,24 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_set_published_len(
     unsafe {
         let writer = &mut *writer_handle.as_type();
         let result = match writer.service_type {
-            iox2_service_type_e::IPC => writer.value.as_mut().ipc.set_published_len(new_len),
-            iox2_service_type_e::LOCAL => writer.value.as_mut().local.set_published_len(new_len),
+            iox2_service_type_e::IPC => writer.value.as_mut().ipc.commit_until(new_len),
+            iox2_service_type_e::LOCAL => writer.value.as_mut().local.commit_until(new_len),
         };
         result.map_or_else(IntoCInt::into_c_int, |_| IOX2_OK)
     }
 }
 
-unsafe fn terminal(writer_handle: iox2_progressive_sample_mut_h, finish: bool) -> c_int {
+unsafe fn terminal(writer_handle: iox2_progressive_sample_mut_h, complete: bool) -> c_int {
     writer_handle.assert_non_null();
     unsafe {
         let writer_struct = &mut *writer_handle.as_type();
         let service_type = writer_struct.service_type;
         let writer = writer_struct.take().expect("valid progressive writer");
         (writer_struct.deleter)(writer_struct);
-        let result = match (service_type, finish) {
-            (iox2_service_type_e::IPC, true) => ManuallyDrop::into_inner(writer.ipc).finish(),
+        let result = match (service_type, complete) {
+            (iox2_service_type_e::IPC, true) => ManuallyDrop::into_inner(writer.ipc).complete(),
             (iox2_service_type_e::IPC, false) => ManuallyDrop::into_inner(writer.ipc).abort(),
-            (iox2_service_type_e::LOCAL, true) => ManuallyDrop::into_inner(writer.local).finish(),
+            (iox2_service_type_e::LOCAL, true) => ManuallyDrop::into_inner(writer.local).complete(),
             (iox2_service_type_e::LOCAL, false) => ManuallyDrop::into_inner(writer.local).abort(),
         };
         result.map_or_else(IntoCInt::into_c_int, |_| IOX2_OK)
@@ -575,7 +574,7 @@ unsafe fn terminal(writer_handle: iox2_progressive_sample_mut_h, finish: bool) -
 ///
 /// `writer_handle` must be a valid owning handle and is consumed even when an error is returned.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn iox2_progressive_sample_mut_finish(
+pub unsafe extern "C" fn iox2_progressive_sample_mut_complete(
     writer_handle: iox2_progressive_sample_mut_h,
 ) -> c_int {
     unsafe { terminal(writer_handle, true) }
@@ -593,7 +592,7 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_abort(
     unsafe { terminal(writer_handle, false) }
 }
 
-/// Drops an active writer. A filling sample becomes aborted and its publisher loan is released.
+/// Drops an active writer. An active sample becomes aborted and its publisher loan is released.
 ///
 /// # Safety
 ///

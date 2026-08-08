@@ -947,7 +947,8 @@ impl<UserHeader: Debug + ZeroCopySend, ServiceType: service::Service>
     /// Selects experimental single-publisher progressive delivery.
     ///
     /// Progressive services always use one publisher, no history, no safe
-    /// overflow, and a 128-byte-aligned byte-slice payload.
+    /// overflow, and a 128-byte-aligned byte-slice payload. Backpressure is
+    /// evaluated when a sample is announced; commits do not enqueue messages.
     pub fn progressive(mut self) -> ProgressiveBuilder<UserHeader, ServiceType> {
         let config = self.config_details_mut();
         config.sample_delivery_mode =
