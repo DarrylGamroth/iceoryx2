@@ -47,6 +47,10 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         row_bytes: ROW_BYTES as u32,
     };
     let writer = loan.announce()?;
+    println!(
+        "announced frame to {} subscribers",
+        writer.number_of_recipients()
+    );
     let fast_sample = fast_subscriber
         .receive()?
         .expect("fast subscriber missed frame");

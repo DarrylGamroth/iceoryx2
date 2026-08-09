@@ -236,14 +236,17 @@ mod progressive_pub_sub {
                 .write(0xfeed_beef);
 
             let mut writer = core::ptr::null_mut();
+            let mut number_of_recipients = 0;
             assert_that!(
                 iox2_progressive_sample_mut_uninit_announce(
                     private_loan,
                     core::ptr::null_mut(),
                     &mut writer,
+                    &mut number_of_recipients,
                 ),
                 eq(IOX2_OK)
             );
+            assert_that!(number_of_recipients, eq(1));
             assert_that!(
                 iox2_progressive_sample_mut_commit_until(&writer, 4),
                 eq(IOX2_OK)
@@ -352,6 +355,7 @@ mod progressive_pub_sub {
                         loan,
                         core::ptr::null_mut(),
                         &mut active,
+                        core::ptr::null_mut(),
                     ),
                     eq(IOX2_OK)
                 );

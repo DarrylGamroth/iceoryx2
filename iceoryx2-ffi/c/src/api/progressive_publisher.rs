@@ -208,7 +208,7 @@ impl ProgressiveSampleMutUnion {
 #[repr(C)]
 #[repr(align(8))]
 pub struct iox2_progressive_sample_mut_storage_t {
-    internal: [u8; 64],
+    internal: [u8; 72],
 }
 
 #[repr(C)]
@@ -374,11 +374,14 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_uninit_user_header_mut(
 ///
 /// `sample_handle` must be a valid owning handle and is consumed. `writer_handle_ptr` must
 /// be writable. `writer_struct_ptr` must be null or point to uninitialized storage.
+/// `number_of_recipients` can be null or must point to a valid [`c_size_t`] to store the
+/// number of subscribers that received the sample when it was announced.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iox2_progressive_sample_mut_uninit_announce(
     sample_handle: iox2_progressive_sample_mut_uninit_h,
     writer_struct_ptr: *mut iox2_progressive_sample_mut_t,
     writer_handle_ptr: *mut iox2_progressive_sample_mut_h,
+    number_of_recipients: *mut c_size_t,
 ) -> c_int {
     sample_handle.assert_non_null();
     debug_assert!(!writer_handle_ptr.is_null());
@@ -391,16 +394,31 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_uninit_announce(
             .expect("valid progressive private loan");
         (sample_struct.deleter)(sample_struct);
 
-        let result = match service_type {
-            iox2_service_type_e::IPC => ManuallyDrop::into_inner(sample.ipc)
-                .announce()
-                .map(ProgressiveSampleMutUnion::new_ipc),
-            iox2_service_type_e::LOCAL => ManuallyDrop::into_inner(sample.local)
-                .announce()
-                .map(ProgressiveSampleMutUnion::new_local),
-        };
+        let result =
+            match service_type {
+                iox2_service_type_e::IPC => {
+                    ManuallyDrop::into_inner(sample.ipc)
+                        .announce()
+                        .map(|writer| {
+                            let number_of_recipients = writer.number_of_recipients();
+                            (
+                                ProgressiveSampleMutUnion::new_ipc(writer),
+                                number_of_recipients,
+                            )
+                        })
+                }
+                iox2_service_type_e::LOCAL => ManuallyDrop::into_inner(sample.local)
+                    .announce()
+                    .map(|writer| {
+                        let number_of_recipients = writer.number_of_recipients();
+                        (
+                            ProgressiveSampleMutUnion::new_local(writer),
+                            number_of_recipients,
+                        )
+                    }),
+            };
         match result {
-            Ok(writer) => {
+            Ok((writer, recipients)) => {
                 let mut storage = writer_struct_ptr;
                 fn no_op(_: *mut iox2_progressive_sample_mut_t) {}
                 let mut deleter: fn(*mut iox2_progressive_sample_mut_t) = no_op;
@@ -410,6 +428,9 @@ pub unsafe extern "C" fn iox2_progressive_sample_mut_uninit_announce(
                 }
                 (*storage).init(service_type, writer, deleter);
                 *writer_handle_ptr = (*storage).as_handle();
+                if !number_of_recipients.is_null() {
+                    *number_of_recipients = recipients;
+                }
                 IOX2_OK
             }
             Err(error) => error.into_c_int(),

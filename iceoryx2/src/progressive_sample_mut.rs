@@ -121,7 +121,9 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
     ///
     /// Subscribers connecting after this call do not receive the active sample.
     /// Queue admission and configured backpressure are evaluated by this call;
-    /// later commits update shared state without enqueuing another offset.
+    /// later commits update shared state without enqueuing another offset. The
+    /// returned writer records the number of subscribers that received the
+    /// announcement; see [`ProgressiveSampleMut::number_of_recipients`].
     pub fn announce(mut self) -> Result<ProgressiveSampleMut<Service, UserHeader>, SendError> {
         let result = self
             .publisher_shared_state
@@ -129,7 +131,7 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
             .announce_progressive_sample(self.offset_to_chunk, self.sample_size);
 
         match result {
-            Ok(_) => {
+            Ok(number_of_recipients) => {
                 self.owns_loan = false;
                 Ok(ProgressiveSampleMut {
                     publisher_shared_state: self.publisher_shared_state.clone(),
@@ -138,6 +140,7 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
                     payload: self.payload,
                     capacity: self.capacity,
                     offset_to_chunk: self.offset_to_chunk,
+                    number_of_recipients,
                     owns_loan: true,
                 })
             }
@@ -198,6 +201,7 @@ pub struct ProgressiveSampleMut<Service: crate::service::Service, UserHeader: De
     payload: *mut u8,
     capacity: usize,
     offset_to_chunk: PointerOffset,
+    number_of_recipients: usize,
     owns_loan: bool,
 }
 
@@ -256,6 +260,14 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
     /// Returns the total byte capacity.
     pub fn payload_capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Returns the number of subscribers that received the sample when it was announced.
+    ///
+    /// This is a fixed fact about the announcement. It does not report whether those
+    /// subscribers are still connected or have processed the sample.
+    pub fn number_of_recipients(&self) -> usize {
+        self.number_of_recipients
     }
 
     /// Returns the current committed prefix length.

@@ -107,6 +107,7 @@ fn committed_length_is_monotonic_bounded_and_prefix_only() {
     let mut loan = publisher.loan_slice_uninit(8).unwrap();
     loan.user_header_mut().sequence = 73;
     let mut writer = loan.announce().unwrap();
+    assert_eq!(writer.number_of_recipients(), 1);
     let sample = subscriber.receive().unwrap().unwrap();
 
     assert_eq!(sample.payload(), &[]);
@@ -225,6 +226,7 @@ fn multiple_subscribers_observe_identical_content_at_independent_speeds() {
     let second = service.subscriber_builder().create().unwrap();
 
     let mut writer = publisher.loan_slice_uninit(32).unwrap().announce().unwrap();
+    assert_eq!(writer.number_of_recipients(), 2);
     let first_sample = first.receive().unwrap().unwrap();
     let second_sample = second.receive().unwrap().unwrap();
 
