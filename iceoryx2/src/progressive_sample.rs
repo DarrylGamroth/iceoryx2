@@ -48,7 +48,7 @@ impl ProgressiveSampleSnapshot {
 /// fn payload_cannot_outlive_sample<'a>(
 ///     sample: ProgressiveSample<ipc::Service, ()>,
 /// ) -> &'a [u8] {
-///     sample.committed_payload()
+///     sample.payload()
 /// }
 /// ```
 #[derive(Debug)]
@@ -108,33 +108,9 @@ impl<Service: crate::service::Service, UserHeader: Debug + ZeroCopySend>
     ///
     /// This constructs a slice of exactly the atomically observed length; it never
     /// materializes a full-capacity slice.
-    pub fn committed_payload(&self) -> &[u8] {
+    pub fn payload(&self) -> &[u8] {
         let snapshot = self.snapshot();
         unsafe { core::slice::from_raw_parts(self.payload, snapshot.committed_len) }
-    }
-
-    /// Returns bytes committed since a subscriber-local processed offset.
-    ///
-    /// Producer commit granularity and consumer processing granularity are
-    /// independent. The offset is local cursor state and is never written to
-    /// shared memory.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `processed_len` is greater than the atomically observed
-    /// committed length.
-    pub fn committed_since(&self, processed_len: usize) -> &[u8] {
-        let snapshot = self.snapshot();
-        assert!(
-            processed_len <= snapshot.committed_len,
-            "processed length exceeds committed length"
-        );
-        unsafe {
-            core::slice::from_raw_parts(
-                self.payload.add(processed_len),
-                snapshot.committed_len - processed_len,
-            )
-        }
     }
 
     /// Acquire-loads the current committed byte length.

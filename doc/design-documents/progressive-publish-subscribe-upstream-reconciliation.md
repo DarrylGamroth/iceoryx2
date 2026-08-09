@@ -22,6 +22,18 @@ No upstream pipeline, DMA-BUF, WaitSet, or alternate sample-tracking work
 invalidates the plan. WaitSet notification and external-device coherency remain
 explicitly outside this implementation.
 
+## Terminology
+
+- **announce** makes one loaned allocation discoverable to the subscribers
+  connected at that moment while retaining an active writer;
+- **commit** advances the contiguous initialized, CPU-visible, immutable prefix;
+- **active** means the writer may still commit more bytes;
+- **complete** ends a sample successfully without changing its committed length;
+- **abort** ends a sample unsuccessfully while preserving its committed prefix;
+  and
+- **payload** is the acquire-bounded committed prefix exposed by a progressive
+  subscriber sample. Capacity remains a separate property of its allocation.
+
 ## Authority and lifetime model
 
 Progressive delivery changes access authority without transferring the
@@ -111,7 +123,7 @@ committed prefix and observes this derived abort.
   access, mutable user-header access, `DerefMut`, and payload borrows that
   outlive the subscriber lease.
 - A counting global allocator test verifies zero allocations across repeated
-  `write_from_slice`, `committed_len`, `committed_payload`, `snapshot`, and
+  `write_from_slice`, `committed_len`, `payload`, `snapshot`, and
   `state` calls.
 - Miri does not validate external DMA behavior. Raw pointers copied by an
   external writer cannot be revoked by Rust; using them after a terminal
@@ -151,7 +163,7 @@ and used until the resulting active writer is completed, aborted, or dropped.
 | CFFI-01 | The C service transition creates only progressive `[u8]` services and retains the one-publisher, zero-history, non-overflowing restrictions. | `iox2_service_builder_progressive_pub_sub` and `service_builder_progressive_pub_sub` | `progressive_c_ffi_preserves_prefix_and_access_authority` for IPC and local | Covered |
 | CFFI-02 | `announce` transfers one private loan into one active-writer handle; complete, abort, and writer drop consume or release it exactly once. | `progressive_publisher` handle implementations | The FFI lifecycle test covers complete, explicit abort, and drop-induced abort. Rust core accounting tests remain authoritative for partial delivery. | Covered |
 | CFFI-03 | The application user header is mutable only before `announce` and immutable afterward. | `iox2_progressive_sample_mut_uninit_user_header_mut`, writer/sample const accessors | The FFI lifecycle test initializes and reads a custom `FrameInfo` layout; no announced-writer mutable accessor exists. | Covered |
-| CFFI-04 | A subscriber obtains one atomic committed-length/state snapshot and only acquire-bounded immutable payload prefixes, never full capacity. | `iox2_progressive_sample_snapshot`, `iox2_progressive_sample_committed_payload` | The FFI lifecycle test observes active lengths 4, 6, and 8 plus the terminal length while capacity remains 32. | Covered |
+| CFFI-04 | A subscriber obtains one atomic committed-length/state snapshot and only acquire-bounded immutable payload prefixes, never full capacity. | `iox2_progressive_sample_snapshot`, `iox2_progressive_sample_payload` | The FFI lifecycle test observes active lengths 4, 6, and 8 plus the terminal length while capacity remains 32. | Covered |
 | CFFI-05 | External commit publication is monotonic and bounded and documents initialization, immutability, and visibility obligations. | `iox2_progressive_sample_mut_commit_until`, `iox2_progressive_write_error_e` | The FFI lifecycle test commits externally written bytes and rejects a regressive boundary. | Covered |
 | CFFI-06 | The ABI supports IPC and local services with the same error/result conventions as ordinary C bindings. | All progressive C unions and existing `IntoCInt` mappings | One generic lifecycle test is instantiated for each backend; the generated header is compiled as C11. | Covered |
 | CFFI-07 | Requested payload alignment is preserved above the 128-byte progressive minimum. | Progressive builder type-detail preparation and C alignment setter | The FFI lifecycle test requests and checks 4096-byte payload alignment. | Covered |

@@ -266,7 +266,7 @@ mod progressive_pub_sub {
             let sample = receive(&subscriber);
             let mut prefix = core::ptr::null();
             let mut committed_len = 0;
-            iox2_progressive_sample_committed_payload(&sample, &mut prefix, &mut committed_len);
+            iox2_progressive_sample_payload(&sample, &mut prefix, &mut committed_len);
             assert_that!(committed_len, eq(4));
             assert_that!(
                 core::slice::from_raw_parts(prefix, committed_len),
@@ -310,7 +310,7 @@ mod progressive_pub_sub {
                 iox2_progressive_sample_mut_commit_until(&writer, 6),
                 eq(IOX2_OK)
             );
-            iox2_progressive_sample_committed_payload(&sample, &mut prefix, &mut committed_len);
+            iox2_progressive_sample_payload(&sample, &mut prefix, &mut committed_len);
             assert_that!(committed_len, eq(6));
             assert_that!(
                 core::slice::from_raw_parts(prefix, committed_len),
@@ -320,7 +320,7 @@ mod progressive_pub_sub {
                 iox2_progressive_sample_mut_write_from_slice(&writer, [7, 8].as_ptr(), 2),
                 eq(IOX2_OK)
             );
-            iox2_progressive_sample_committed_payload(&sample, &mut prefix, &mut committed_len);
+            iox2_progressive_sample_payload(&sample, &mut prefix, &mut committed_len);
             assert_that!(committed_len, eq(8));
             assert_that!(
                 core::slice::from_raw_parts(prefix, committed_len),

@@ -109,17 +109,17 @@ fn committed_length_is_monotonic_bounded_and_prefix_only() {
     let mut writer = loan.announce().unwrap();
     let sample = subscriber.receive().unwrap().unwrap();
 
-    assert_eq!(sample.committed_payload(), &[]);
+    assert_eq!(sample.payload(), &[]);
     assert_eq!(sample.state(), ProgressiveSampleState::Active);
     assert_eq!(sample.snapshot().committed_len(), 0);
     assert_eq!(sample.snapshot().state(), ProgressiveSampleState::Active);
     assert_eq!(sample.user_header().sequence, 73);
 
     writer.write_from_slice(&[1, 2, 3]).unwrap();
-    assert_eq!(sample.committed_payload(), &[1, 2, 3]);
+    assert_eq!(sample.payload(), &[1, 2, 3]);
     assert_eq!(sample.snapshot().committed_len(), 3);
     assert_eq!(sample.snapshot().state(), ProgressiveSampleState::Active);
-    let early_prefix = sample.committed_payload();
+    let early_prefix = sample.payload();
 
     unsafe { writer.commit_until(3) }.unwrap();
     assert_eq!(
@@ -133,13 +133,13 @@ fn committed_length_is_monotonic_bounded_and_prefix_only() {
     assert_eq!(early_prefix, &[1, 2, 3]);
 
     writer.write_from_slice(&[4, 5]).unwrap();
-    assert_eq!(sample.committed_payload(), &[1, 2, 3, 4, 5]);
-    assert_eq!(sample.committed_since(3), &[4, 5]);
+    assert_eq!(sample.payload(), &[1, 2, 3, 4, 5]);
+    assert_eq!(&sample.payload()[3..], &[4, 5]);
     writer.complete().unwrap();
     let terminal = sample.snapshot();
     assert_eq!(terminal.state(), ProgressiveSampleState::Complete);
     assert_eq!(terminal.committed_len(), 5);
-    assert_eq!(sample.committed_payload(), &[1, 2, 3, 4, 5]);
+    assert_eq!(sample.payload(), &[1, 2, 3, 4, 5]);
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn subscriber_connecting_after_announcement_does_not_receive_active_sample() {
 
     let late = service.subscriber_builder().create().unwrap();
     assert!(late.receive().unwrap().is_none());
-    assert_eq!(active.committed_payload(), &[1, 2, 3]);
+    assert_eq!(active.payload(), &[1, 2, 3]);
     writer.complete().unwrap();
 }
 
@@ -200,7 +200,7 @@ fn active_writer_drop_aborts_and_offset_is_delivered_once() {
     drop(writer);
 
     assert_eq!(sample.state(), ProgressiveSampleState::Aborted);
-    assert_eq!(sample.committed_payload(), &[9, 8]);
+    assert_eq!(sample.payload(), &[9, 8]);
 }
 
 #[test]
@@ -231,10 +231,7 @@ fn multiple_subscribers_observe_identical_content_at_independent_speeds() {
     for block in 0..4u8 {
         let bytes = [block, block ^ 0x5a, block.wrapping_mul(17), 0xa5];
         writer.write_from_slice(&bytes).unwrap();
-        assert_eq!(
-            first_sample.committed_payload(),
-            second_sample.committed_payload()
-        );
+        assert_eq!(first_sample.payload(), second_sample.payload());
         assert_eq!(first_sample.committed_len(), (block as usize + 1) * 4);
     }
     writer.complete().unwrap();
@@ -407,7 +404,7 @@ fn subscriber_lease_prevents_allocation_reuse_after_publisher_completion() {
     let sample = subscriber.receive().unwrap().unwrap();
     writer.write_from_slice(&[42]).unwrap();
     writer.complete().unwrap();
-    let held_payload = sample.committed_payload().as_ptr();
+    let held_payload = sample.payload().as_ptr();
 
     for _ in 0..8 {
         let loan = publisher.loan_slice_uninit(8).unwrap();
@@ -449,7 +446,7 @@ fn one_subscriber_may_drop_while_another_continues() {
     writer.write_from_slice(&[1, 2, 3]).unwrap();
     drop(first_sample);
     writer.write_from_slice(&[4, 5]).unwrap();
-    assert_eq!(second_sample.committed_payload(), &[1, 2, 3, 4, 5]);
+    assert_eq!(second_sample.payload(), &[1, 2, 3, 4, 5]);
     writer.complete().unwrap();
     assert_eq!(second_sample.state(), ProgressiveSampleState::Complete);
 }
@@ -487,7 +484,7 @@ fn queue_backpressure_is_evaluated_only_when_announcing_a_new_frame() {
     // configured queue-full policy.
     let second = publisher.loan_slice_uninit(8).unwrap().announce().unwrap();
     let sample = subscriber.receive().unwrap().unwrap();
-    assert_eq!(sample.committed_payload(), &[1, 2, 3, 4]);
+    assert_eq!(sample.payload(), &[1, 2, 3, 4]);
     assert!(subscriber.receive().unwrap().is_none());
     second.abort().unwrap();
     first.complete().unwrap();
@@ -616,7 +613,7 @@ fn concurrent_prefix_stress_has_no_torn_blocks() {
             scope.spawn(move || {
                 let mut consumed = 0;
                 while consumed < BLOCKS {
-                    let payload = sample.committed_payload();
+                    let payload = sample.payload();
                     while consumed < payload.len() / BLOCK_SIZE {
                         let start = consumed * BLOCK_SIZE;
                         let sequence =
@@ -702,7 +699,7 @@ fn multi_process_progressive_stress_has_no_torn_blocks() {
             };
             let mut consumed = 0;
             while consumed < BLOCKS {
-                let payload = sample.committed_payload();
+                let payload = sample.payload();
                 while consumed < payload.len() / BLOCK_SIZE {
                     let start = consumed * BLOCK_SIZE;
                     let sequence =
@@ -804,7 +801,7 @@ fn abrupt_publisher_process_death_is_reported_as_abort() {
             );
             std::thread::yield_now();
         }
-        assert_eq!(sample.committed_payload(), &[1, 2, 3, 4]);
+        assert_eq!(sample.payload(), &[1, 2, 3, 4]);
 
         let terminal = loop {
             let snapshot = sample.snapshot_with_publisher_liveness().unwrap();
@@ -820,7 +817,7 @@ fn abrupt_publisher_process_death_is_reported_as_abort() {
         assert_eq!(terminal.committed_len(), 4);
 
         // Already committed bytes remain readable after the derived abort.
-        assert_eq!(sample.committed_payload(), &[1, 2, 3, 4]);
+        assert_eq!(sample.payload(), &[1, 2, 3, 4]);
     };
 
     if let (Ok(role), Ok(service_name)) = (std::env::var(ROLE), std::env::var(NAME)) {

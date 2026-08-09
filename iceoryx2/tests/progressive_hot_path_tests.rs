@@ -65,8 +65,8 @@ fn commit_and_polling_hot_paths_do_not_allocate() {
         writer.write_from_slice(&[index as u8]).unwrap();
         let snapshot = sample.snapshot();
         assert_eq!(snapshot.committed_len(), index + 1);
-        assert_eq!(sample.committed_payload()[index], index as u8);
-        assert_eq!(sample.committed_since(index), &[index as u8]);
+        assert_eq!(sample.payload()[index], index as u8);
+        assert_eq!(&sample.payload()[index..], &[index as u8]);
         let _ = sample.state();
     }
     let hot_path_allocations = ALLOCATIONS.load(Ordering::SeqCst);

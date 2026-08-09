@@ -336,7 +336,7 @@ pub unsafe extern "C" fn iox2_progressive_sample_snapshot_with_publisher_livenes
 ///
 /// `sample_handle` must be valid. `payload_ptr` and `committed_len` must be writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn iox2_progressive_sample_committed_payload(
+pub unsafe extern "C" fn iox2_progressive_sample_payload(
     sample_handle: iox2_progressive_sample_h_ref,
     payload_ptr: *mut *const u8,
     committed_len: *mut c_size_t,
@@ -347,8 +347,8 @@ pub unsafe extern "C" fn iox2_progressive_sample_committed_payload(
     unsafe {
         let sample = &*sample_handle.as_type();
         let payload = match sample.service_type {
-            iox2_service_type_e::IPC => sample.value.as_ref().ipc.committed_payload(),
-            iox2_service_type_e::LOCAL => sample.value.as_ref().local.committed_payload(),
+            iox2_service_type_e::IPC => sample.value.as_ref().ipc.payload(),
+            iox2_service_type_e::LOCAL => sample.value.as_ref().local.payload(),
         };
         *payload_ptr = payload.as_ptr();
         *committed_len = payload.len();

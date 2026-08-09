@@ -79,7 +79,8 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
             let mut consumed_rows = 0;
             let mut latency_ns = 0u128;
             while consumed_rows < ROWS {
-                let available = fast_sample.committed_since(consumed_rows * ROW_BYTES);
+                let payload = fast_sample.payload();
+                let available = &payload[consumed_rows * ROW_BYTES..];
                 for row in available.chunks_exact(ROW_BYTES) {
                     validate_row(consumed_rows, row);
                     let published = fast_times[consumed_rows].load(Ordering::Relaxed);
@@ -96,7 +97,8 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
             let mut consumed_rows = 0;
             let mut latency_ns = 0u128;
             while consumed_rows < ROWS {
-                let available = slow_sample.committed_since(consumed_rows * ROW_BYTES);
+                let payload = slow_sample.payload();
+                let available = &payload[consumed_rows * ROW_BYTES..];
                 for row in available.chunks_exact(ROW_BYTES) {
                     validate_row(consumed_rows, row);
                     let published = publication_times[consumed_rows].load(Ordering::Relaxed);
