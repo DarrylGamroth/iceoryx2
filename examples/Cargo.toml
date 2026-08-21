@@ -195,6 +195,10 @@ path = "rust/publish_subscribe/publisher.rs"
 name = "publish_subscribe_subscriber"
 path = "rust/publish_subscribe/subscriber.rs"
 
+[[example]]
+name = "progressive_publish_subscribe_polling"
+path = "rust/progressive_publish_subscribe/polling.rs"
+
 # publish_subscribe_dynamic_data
 
 [[example]]

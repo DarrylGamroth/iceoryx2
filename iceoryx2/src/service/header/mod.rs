@@ -14,6 +14,9 @@
 /// [`MessagingPattern::PublishSubscribe`](crate::service::messaging_pattern::MessagingPattern::PublishSubscribe)
 pub mod publish_subscribe;
 
+/// Internal sample header for experimental progressive publish/subscribe.
+pub mod progressive_publish_subscribe;
+
 /// Payload headers used by
 /// [`MessagingPattern::RequestResponse`](crate::service::messaging_pattern::MessagingPattern::RequestResponse)
 pub mod request_response;

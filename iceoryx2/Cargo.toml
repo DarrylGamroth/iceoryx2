@@ -69,3 +69,7 @@ iceoryx2-bb-testing = { workspace = true, features = ["std"] }
 name = "iceoryx2-tests"
 path = "tests/tests.rs"
 harness = false
+
+[[test]]
+name = "progressive-hot-path"
+path = "tests/progressive_hot_path_tests.rs"

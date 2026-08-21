@@ -563,6 +563,12 @@ pub mod sample_mut;
 /// The uninitialized payload that is sent by a [`Publisher`](crate::port::publisher::Publisher).
 pub mod sample_mut_uninit;
 
+/// Samples received from an experimental progressive publish/subscribe service.
+pub mod progressive_sample;
+
+/// Publisher typestates for experimental progressive publish/subscribe.
+pub mod progressive_sample_mut;
+
 /// The foundation of communication the service with its
 /// [`MessagingPattern`](crate::service::messaging_pattern::MessagingPattern)
 pub mod service;

@@ -53,6 +53,7 @@ use iceoryx2_log::{fail, warn};
 
 use crate::port::port_name::PortName;
 use crate::port::update_connections::UpdateConnections;
+use crate::progressive_sample::ProgressiveSample;
 use crate::service::SharedServiceState;
 use crate::service::dynamic_config::publish_subscribe::{PublisherDetails, SubscriberDetails};
 use crate::service::port_factory::subscriber::SubscriberConfig;
@@ -413,7 +414,7 @@ impl<
             .has_chunks(ChannelId::new(0)))
     }
 
-    fn receive_impl(&self) -> Result<Option<(ChunkDetails, Chunk)>, ReceiveError> {
+    pub(crate) fn receive_impl(&self) -> Result<Option<(ChunkDetails, Chunk)>, ReceiveError> {
         fail!(from self, when self.update_connections(),
                 "Some samples are not being received since not all connections to publishers could be established.");
 
@@ -421,6 +422,30 @@ impl<
             .lock()
             .receiver
             .receive(ChannelId::new(0))
+    }
+}
+
+impl<Service: service::Service, UserHeader: Debug + ZeroCopySend>
+    Subscriber<Service, [u8], UserHeader>
+{
+    pub(crate) fn receive_progressive(
+        &self,
+    ) -> Result<Option<ProgressiveSample<Service, UserHeader>>, ReceiveError> {
+        use crate::service::header::progressive_publish_subscribe::Header as ProgressiveHeader;
+
+        Ok(self.receive_impl()?.map(|(details, chunk)| {
+            let header = chunk.header.cast::<ProgressiveHeader>();
+            let capacity = usize::try_from(unsafe { &*header }.number_of_elements())
+                .expect("progressive sample capacity is unsupported by this target");
+            ProgressiveSample {
+                subscriber_shared_state: self.subscriber_shared_state.clone(),
+                details,
+                header,
+                user_header: chunk.user_header.cast(),
+                payload: chunk.payload,
+                capacity,
+            }
+        }))
     }
 }
 

@@ -32,6 +32,10 @@ pub mod listener;
 pub mod notifier;
 /// The name for a port.
 pub mod port_name;
+/// Sending endpoint for experimental progressive publish/subscribe.
+pub mod progressive_publisher;
+/// Receiving endpoint for experimental progressive publish/subscribe.
+pub mod progressive_subscriber;
 /// Sending endpoint (port) for publish-subscribe based communication
 pub mod publisher;
 /// Reading endpoint (port) for blackboard based communication
